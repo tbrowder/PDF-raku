@@ -1,7 +1,7 @@
 [[Raku PDF Project]](https://pdf-raku.github.io)
  / [PDF](https://pdf-raku.github.io/PDF-raku)
 
-[![Actions Status](https://github.com/pdf-raku/PDF-raku/workflows/lin-mac-win/badge.svg)](https://github.com/pdf-raku/PDF-raku/actions)
+[![Actions Status](https://github.com/pdf-raku/PDF-raku/workflows/test/badge.svg)](https://github.com/pdf-raku/PDF-raku/actions)
 
 
 PDF-raku
