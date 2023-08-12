@@ -46,6 +46,7 @@ role PDF::IO::Crypt::AST {
         $.crypt-ast( |$h.kv, |c )
     }
 
-    multi method crypt-ast(Str $key, $) is default { }
+    multi method crypt-ast(Str $key, $) { }
+    multi method crypt-ast(Numeric) { }
 
 }

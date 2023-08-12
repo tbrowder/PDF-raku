@@ -44,7 +44,7 @@ class PDF::IO::Crypt::AESV2
     }
 
     multi method crypt( $bytes, Str :$mode! where 'encrypt'|'decrypt',
-                        UInt :$obj-num!, UInt :$gen-num! ) is default {
+                        UInt :$obj-num!, UInt :$gen-num! ) {
 
         my $obj-key = self!object-key( $obj-num, $gen-num );
         self."$mode"( $obj-key, $bytes);
@@ -58,7 +58,7 @@ class PDF::IO::Crypt::AESV2
     }
 
     method decrypt( $key, $enc-iv) {
-        my Buf $iv .= new: $enc-iv[0 ..^ KeyLen];
+        my Buf $iv .= new: $enc-iv[^KeyLen];
         my @enc = +$enc-iv > KeyLen ?? $enc-iv[KeyLen .. *] !! [];
         self!aes-decrypt($key, Buf.new(@enc), :$iv );
     }

@@ -1,4 +1,4 @@
-#!/usr/bin/env perl6
+#!/usr/bin/env raku
 
 use Test;
 use JSON::Fast;
@@ -9,12 +9,6 @@ use PDF::Grammar::Test;
 use PDF::IO;
 use PDF::IO::Writer;
 
-unless $*PERL.compiler.version >= v2017.04 {
-    plan 0;
-    skip-rest "Rakudo/JSON < 2017.04 incompatibilty";
-    exit;
-}
-
 my PDF::Grammar::COS::Actions $actions .= new();
 
 for 't/pdf'.IO.dir.grep(/ [\w|'-']*? '.json'$/).sort -> $json-file {
@@ -24,19 +18,19 @@ for 't/pdf'.IO.dir.grep(/ [\w|'-']*? '.json'$/).sort -> $json-file {
     my $pdf-input-file = $json-file.subst( /'.json'$/, '.in' );
     next unless $pdf-input-file.IO.e;
     my $pdf-output-file = $json-file.subst( /'.json'$/, '.out' );
-    my PDF::IO $input .= COERCE( $pdf-input-file.IO );
+    my PDF::IO() $input = $pdf-input-file.IO;
     my PDF::IO::Writer $pdf-output .= new( :$input, :offset(0), :%ast );
     $pdf-output-file.IO.spurt: $pdf-output.Blob;
 
-    my ($rule) = %ast.keys;
+    my $rule = %ast.keys.head;
     my %expected = :%ast;
 
-    my $class = PDF::Grammar::COS;
+    my PDF::Grammar::COS $class;
 
     PDF::Grammar::Test::parse-tests($class, ~$input, :$rule, :$actions, :suite("[$pdf-input-file]"), :%expected );
 
     my $json-output-file = $pdf-output-file ~ '.json';
-    my PDF::IO $output .= COERCE( $pdf-output-file.IO );
+    my PDF::IO() $output = $pdf-output-file.IO;
     PDF::Grammar::Test::parse-tests($class, ~$output, :$rule, :$actions, :suite("[$pdf-output-file]"), :%expected );
 }
 

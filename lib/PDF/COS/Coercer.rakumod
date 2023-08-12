@@ -3,7 +3,7 @@ class X::PDF::Coerce
 	has $.obj is required;
 	has $.type is required;
 	method message {
-	    "unable to coerce object {$!obj.perl} of type {$!obj.WHAT.^name} to {$!type.WHAT.^name}"
+	    "unable to coerce object {$!obj.raku} of type {$!obj.WHAT.^name} to {$!type.WHAT.^name}"
 	}
 }
 
@@ -12,11 +12,11 @@ class PDF::COS::Coercer {
     use PDF::COS;
     use PDF::COS::Tie::Array;
     use PDF::COS::Tie::Hash;
-    use PDF::COS::Null;
     use PDF::COS::ByteString;
     use PDF::COS::DateString;
+    use PDF::COS::Null;
     use PDF::COS::TextString;
-
+    our $warn;
     method coerce($a is raw, $b is raw) { self.coerce-to($a, $b) }
 
     # strip enumerations
@@ -34,24 +34,23 @@ class PDF::COS::Coercer {
     multi method coerce-to( PDF::COS $obj is rw, PDF::COS $type, |c) {
         unless $obj ~~ $type {
             if $obj ~~ PDF::COS::ByteString && $type ~~ PDF::COS::TextString | PDF::COS::DateString {
-                $obj = $type.COERCE( $obj, |c );
+                $obj = $type.COERCE: $obj, |c ;
             }
-            else {
-	        warn X::PDF::Coerce.new( :$obj, :$type )
+            elsif $warn {
+	        warn X::PDF::Coerce.new: :$obj, :$type;
             }
         }
         $obj;
     }
 
-    multi method coerce-to($obj is rw, PDF::COS $class, |c) is default {
+    multi method coerce-to($obj is rw, PDF::COS $class, |c) {
 	$obj = $class.COERCE( $obj, |c );
     }
-    multi method coerce-to($obj, PDF::COS $class, |c) is default {
+    multi method coerce-to($obj, PDF::COS $class, |c) {
 	$class.COERCE( $obj, |c );
     }
 
-
-    multi method coerce-to( Array:D $obj is copy, PDF::COS::Tie::Array $role) {
+    multi method coerce-to( List:D $obj is copy, PDF::COS::Tie::Array $role) {
         PDF::COS.coerce($obj).mixin: $role;
     }
 
@@ -60,7 +59,7 @@ class PDF::COS::Coercer {
     }
 
     multi method coerce-to( Any:D $obj, $type) {
-	warn X::PDF::Coerce.new( :$obj, :$type );
+	warn X::PDF::Coerce.new( :$obj, :$type ) if $warn;
         $obj;
     }
 

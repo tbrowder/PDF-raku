@@ -5,6 +5,9 @@ use PDF::COS::Tie :COSDictAttrHOW;
 role PDF::COS::Tie::Hash
     does PDF::COS::Tie {
 
+    has Str %.aliases;
+    has Bool %.required-entries;
+
     use PDF::COS;
     #| resolve a heritable property by dereferencing /Parent entries
     sub inherit($object, Str $key, :$seen is copy) {
@@ -46,7 +49,9 @@ role PDF::COS::Tie::Hash
            given att.cos {
                my \key  = .accessor-name;
                %.entries{key} //= att;
+               %!required-entries{key} = True if .is-required;
                with .alias -> \alias {
+                   %!aliases{alias} = key;
                    self{key} //= $_
                        with self{alias}:delete;
                }
@@ -56,7 +61,7 @@ role PDF::COS::Tie::Hash
 
     method check {
         self.AT-KEY($_, :check)
-            for (flat self.keys, self.entries.grep(*.value.cos.is-required).keys).unique.sort;
+            for unique(self.keys.Slip, %!required-entries.keys.sort.Slip);
         self.?cb-check();
         self
     }
@@ -85,12 +90,11 @@ role PDF::COS::Tie::Hash
 	nextwith($key, $lval )
     }
 
-    multi method COERCE(PDF::COS::Tie::Hash $h) {
-        $h.mixin: self.^roles[0];
+    multi method COERCE(PDF::COS::Tie::Hash $hash) {
+        self.induce: $hash;
     }
-    multi method COERCE(Hash:D $h is raw, :class($) where !.so, |c) {
-        my $dict = $h<dict> // $h;
+    multi method COERCE(Hash $dict is raw, |c) {
         my Hash:U $class := PDF::COS.load-dict($dict);
-        $class.COERCE($h, :class, |c).mixin: self.^roles[0];
+        self.induce: $class.new(:$dict, |c);
     }
 }

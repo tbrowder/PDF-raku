@@ -1,6 +1,5 @@
 {
-  "api": "PDF-1.7",
-  "auth": "github:pdf-raku",
+  "auth": "zef:dwarring",
   "authors": [
     "David Warring"
   ],
@@ -8,9 +7,11 @@
   ],
   "depends": [
     "Compress::Zlib",
-    "PDF::Grammar:ver<0.2.1+>",
+    "Hash::int",
     "JSON::Fast",
-    "OpenSSL"
+    "Method::Also",
+    "OpenSSL",
+    "PDF::Grammar:ver<0.3.1+>"
   ],
   "description": "Base classes for reading, manipulation and writing of PDF data",
   "license": "Artistic-2.0",
@@ -56,11 +57,11 @@
     "PDF::IO::Filter::RunLength": "lib/PDF/IO/Filter/RunLength.rakumod",
     "PDF::IO::Handle": "lib/PDF/IO/Handle.rakumod",
     "PDF::IO::IndObj": "lib/PDF/IO/IndObj.rakumod",
-    "PDF::IO::Serializer": "lib/PDF/IO/Serializer.rakumod",
     "PDF::IO::Reader": "lib/PDF/IO/Reader.rakumod",
-    "PDF::IO::Writer": "lib/PDF/IO/Writer.rakumod",
+    "PDF::IO::Serializer": "lib/PDF/IO/Serializer.rakumod",
     "PDF::IO::Str": "lib/PDF/IO/Str.rakumod",
-    "PDF::IO::Util": "lib/PDF/IO/Util.rakumod"
+    "PDF::IO::Util": "lib/PDF/IO/Util.rakumod",
+    "PDF::IO::Writer": "lib/PDF/IO/Writer.rakumod"
   },
   "resources": [
   ],
@@ -70,5 +71,5 @@
   ],
   "test-depends": [
   ],
-  "version": "0.4.5"
+  "version": "0.5.19"
 }

@@ -2,26 +2,30 @@ use v6;
 
 class PDF::COS::Loader {
 
+    use PDF::COS;
     use PDF::COS::Util :from-ast;
 
     method class-paths { 'PDF::COS::Type' }
 
     our %handler;
-    method handler {%handler}
+    my Lock $lock .= new;
+    method handler is DEPRECATED {%handler} # Not thread-safe
     method warn {False}
 
     method install-delegate( Str $subclass, $class-def ) is rw {
-        %handler{$subclass} = $class-def;
+        $lock.protect: { %handler{$subclass} = $class-def; }
     }
 
-    method find-delegate( Str $type!, $subtype?, :$base-class! ) is default {
+    method find-delegate( Str $type!, $subtype?, :$base-class! ) {
 
 	my Str $subclass = $type;
 	$subclass ~= '::' ~ $_
             with $subtype;
 
-	return %handler{$subclass}
-	    if %handler{$subclass}:exists;
+        $lock.protect: {
+            return %handler{$subclass}
+                if %handler{$subclass}:exists;
+        }
 
         my $handler-class = $base-class;
         my Bool $resolved;
@@ -31,6 +35,7 @@ class PDF::COS::Loader {
             $handler-class = PDF::COS.required($class-name);
             if $handler-class ~~ Failure {
                 warn "failed to load: $class-name: {$handler-class.exception.message}";
+                $handler-class.so; # silence DESTROY warnings
                 $handler-class = $base-class;
             }
             else {
@@ -60,8 +65,9 @@ class PDF::COS::Loader {
 	$.find-delegate( type, subtype, :$base-class );
     }
 
-    multi method load-delegate( :$base-class!, |c ) is default {
+    multi method load-delegate( :$base-class!, |c ) {
 	$base-class;
     }
 
+    method pdf-class { PDF::COS.required('PDF') }
 }

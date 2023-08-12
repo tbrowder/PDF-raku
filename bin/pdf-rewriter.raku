@@ -1,4 +1,4 @@
-#!/usr/bin/env perl6
+#!/usr/bin/env raku
 # Simple round trip read and rewrite a PDF
 use v6;
 use PDF::IO::Reader;
@@ -6,20 +6,25 @@ use PDF;
 
 #| rewrite a PDF or FDF and/or convert to/from JSON
 sub MAIN(
-    Str $file-in,               #= input PDF, FDF or JSON file (.json extension)
-    Str $file-out = $file-in,   #= output PDF, FDF or JSON file (.json extension)
-    Str  :$password  = '';      #= password for encrypted documents
-    Bool :$repair    = False,   #= bypass and repair index. recompute stream lengths. Handy when
-                                #= PDF files have been hand-edited.
-    Bool :$rebuild  is copy,    #= rebuild object tree (renumber, garbage collect and deduplicate objects)
-    Bool :$compress is copy,    #= compress streams
-    Bool :$uncompress,          #= uncompress streams
-    Str  :$class is copy,       #= load a class (PDF::Class, PDF::Lite, PDF::API6)
-    Bool :$render,              #= render and reformat content (needs PDF::Lite or PDF::Class)
-    Bool :$decrypt is copy,     #= decrypt
+    Str $file-in,               # input PDF, FDF or JSON file
+    Str $file-out = $file-in,   # output PDF, FDF or JSON file
+    Str  :$password  = '';      # password for encrypted documents
+    Bool :$repair    = False,   # bypass and repair index. recompute stream lengths. Handy when
+                                # PDF files have been hand-edited.
+    Bool :$rebuild is copy,     # rebuild object tree (renumber, garbage collect and deduplicate objects)
+    Bool :$compress is copy,    # compress streams
+    Bool :$uncompress,          # uncompress streams
+    Str  :$class is copy,       # load a class (PDF::Class, PDF::Lite, PDF::API6)
+    Bool :$render,              # render and reformat content (needs PDF::Lite or PDF::Class)
+    Bool :$decrypt is copy,     # decrypt
+    Bool :$stream,              # write early and progressively
+    Rat :$compat,               # PDF compatibility level (1.4 or 1.5)
     ) {
 
-    $compress //= False if $uncompress || $render;
+    die "Can't stream a PDF file to itself"
+        if $stream && $file-out eq $file-in;
+
+    $compress //= False if $uncompress;
     $rebuild  //= True  if $decrypt || $render;
     $class    //= 'PDF::Lite' if $render;
 
@@ -42,6 +47,8 @@ sub MAIN(
     else {
         $reader .= new.open( $file-in, :$repair, :$password );
     }
+
+    $reader.compat = $_ with $compat;
 
     if $decrypt {
         with $reader.crypt {
@@ -72,13 +79,17 @@ sub MAIN(
         my $n = $pdf.page-count;
         for 1 .. $n {
             $*ERR.print: "rendering... $_/$n\r";
-            $pdf.page($_).render;
+            with $pdf.page($_) {
+                .render;
+                .<Contents><Filter>:delete
+                    unless $compress;
+            }
         }
         $*ERR.say: '';
     }
 
     note "saving ...";
-    ($pdf // $reader).save-as($file-out, :$rebuild);
+    ($pdf // $reader).save-as($file-out, :$stream, :$rebuild);
     note "done";
 
 }
@@ -91,11 +102,12 @@ pdf-rewriter.raku - Rebuild a PDF using L<PDF> modules.
 
 =head1 SYNOPSIS
 
-pdf-rewriter.raku [options] file.pdf [out.pdf]
-pdf-rewriter.raku [options] file.pdf [out.json] # convert to json
-pdf-rewriter.raku [options] file.json [out.pdf] # convert from json
+    pdf-rewriter.raku [options] file.pdf [out.pdf]
+    pdf-rewriter.raku [options] file.pdf [out.json] # convert to json
+    pdf-rewriter.raku [options] file.json [out.pdf] # convert from json
 
-Options:
+=head2 Options
+
    --password    password for an encrypted PDF
    --repair      repair the input PDF
    --rebuild     rebuild object tree (renumber, garbage collect and deduplicate objects)
@@ -104,6 +116,7 @@ Options:
    --class=name  load class (PDF::Lite, PDF::Class, PDF::API6)
    --render      render and reformat content (needs PDF::Class or PDF::Lite)
    --decrypt     remove encryption
+   --stream      write progressively and early
 
 =head1 DESCRIPTION
 

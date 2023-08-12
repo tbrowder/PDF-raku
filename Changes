@@ -1,11 +1,183 @@
-Release 0.4.5
-- Rename classes PDF::Writer -> PDF::IO::Writer and PDF::Reader
-  -> PDF::IO::Reader. Free up PDF::Reader and PDF::Writer for
-  Raku ecosystem usage.
+{{$NEXT}}
+
+0.5.19  2023-08-04T16:09:25+12:00
+    - Fix xref loading via PDF::Native to allow whitespace between
+      xref and trailer.
+
+0.5.18  2023-05-24T08:53:23+12:00
+    - Rework invalid test in t/cos-tie-entry.t, which was failing on
+      Rakudo blead
+
+0.5.17  2023-05-18T07:16:56+12:00
+    - Increase indirect object parse window by 1 byte.
+      fixes: https://github.com/pdf-raku/PDF-Class-raku/issues/22
+
+0.5.16  2023-02-21T05:46:04+13:00
+    - Add :$file option to new(). Implicitly opens a PDF
+
+0.5.15  2023-01-25T06:41:44+13:00
+    - Handle and throw on IO.open failures
+
+0.5.14  2023-01-19T14:59:45+13:00
+   - Suppress warning from PDF::COS::Coercer. See
+     https://github.com/pdf-raku/PDF-Class-raku/issues/21
+
+0.5.13  2022-12-11T09:21:41+13:00
+   - make pdf-rewriter.raku --render option only uncompress page content
+   - refactor of PDF::COS::Tie multi-methods. Added !tie-container() private
+     method for Hash/Dict coercement.
+
+0.5.12  2022-07-27T05:13:06+12:00
+   - Ensure cross reference entries are sorted by object number #35
+
+0.5.11  2022-07-04T15:46:11+12:00
+   - Fix locking for consistency in PDF::COS::Util ast_coerce()
+
+0.5.10  2022-07-04T12:46:14+12:00
+   - Fix pdf-checker.raku for PDF 0.5.8+
+   - Add PDF::COS::Dict required-entries() and aliases method
+   - Deprecate Hash slow-path in PDF::IO::Writer
+   - Fix regression in Pod::To::PDF t/render-pdf-test-sheets.t
+
+0.5.9  2022-06-09T08:20:15+12:00
+   - Fix writing of Any as 'null'
+
+0.5.8  2022-06-07T16:19:57+12:00
+   - Use PDF::Grammar v0.2.9+ :lite mode for lighter AST's.
+   - Numeric objects are no longer cast to roles PDF::COS::Int,
+     PDF::COS::Bool, PDF::COS::Real unless they are indirect
+     objects.
+   - Utilize PDF::Native v0.0.2+ cross reference stream
+     unpack-xref-stream() and pack-xref-stream() subroutines.
+   - Add --compat option to pdf-rewriter.raku script.
+
+0.5.7  2022-06-02T06:26:44+12:00
+   - Upgrade from 32 to 64 bit indexing in cross reference streams
+     to support opening very large PDF 1.5+ (> 3.2Gb) files.
+   - Added compatibility and automatic loading of PDF::Native. Soon
+     to be released optional performance enhancement module.
+
+0.5.6  2022-05-21T09:43:39+12:00
+   - More thread protection for array/hash construction
+
+0.5.5  2022-05-19T12:58:40+12:00
+   - Fix possible memory leaks in PDF object construction
+
+0.5.4  2022-05-12T13:37:30+12:00
+   - Fix a thread-safety issue in PDF::COS::Util ast-coerce() sub.
+
+0.5.3  2022-05-12T07:59:14+12:00
+   - Fix a thread-safety issue in PDF::COS::Tie tie() method.
+
+0.5.2  2022-05-11T12:58:16+12:00
+   - Partially back-out PDF::COS required() method to fix PDF::Class
+     regressions from 0.5.0 release.
+
+0.5.1  2022-05-07T09:32:57+12:00
+   - Further lock-protection of dynamically 'require'd classes
+     for thread safety
+
+0.5.0  2022-05-06T13:19:02+12:00
+   - Improved thread safety of reading and fetching objects.
+     -- Protect PDF::COS loader() method
+     -- Protect Reader ind-obj method to allow concurrent fetching
+     -- Better scoping of %seen + general refactor in PDF::COS::{Dict|Array}
+     -- Some locking and deprecations in PDF::COS::Loader
+     -- Added test t/threads.t
+     This round of changes targets concurrent PDF reading only!
+
+0.4.25  2022-03-31T16:42:09+13:00
+   - Replace role() method with induce(). Only mixin punned roles.
+
+0.4.24  2022-03-26T07:41:03+13:00
+   - Further fixes to latin-1 in ByteString coercements
+
+0.4.23  2022-03-13T17:25:53+13:00
+   - Ensure strings are latin-1 in ByteString coercements
+   - Simplify date string coercements
+   - Add X::PDF::NoTrailer error
+
+0.4.22  2022-03-13T17:07:05+13:00
+   - Initial CPAN -> zef release
+
+0.4.22  2022-02-24T13:21:35+13:00
+   - Replace role-model() method with role()
+
+0.4.21  2022-02-23T14:06:44+13:00
+   - Attempted fix of flapping error in PDF::COS::Tie role-model() method
+
+0.4.20  2022-02-06T11:53:46+13:00
+  - Fix PDF::IO::Filter::RunLength for pending Rakudo 2022.02; niner++
+
+0.4.19  2022-01-12T06:47:11+13:00
+  - Refactor Array coercements for consistency with Dict and Stream
+  - Fixed PDF::IO::Writer name serialization to encode '#' as #23 (not ##)
+  - Fixed some test fails from git checkout on Windows #31 
+
+0.4.18  2022-01-01T07:42:10+13:00
+  - PDF::COS::Bool now does the PDF::COS role
+  - Fixed PDFDoc encoding by regenerating from PDF::ISO_32000 resource:
+    Table_D2-PDFDocEncoding_Character_Set.json
+  - Fixed PDF::COS::TextString to handle non-byte strings (e.g. /ActualText
+    in content streams).
+  - Improvements to PDF::COS::TextString utf16-be encoding
+
+0.4.17  2021-09-29T14:46:25+13:00
+  - Refix PDF::COS::DateTime.new
+
+0.4.16  2021-09-28T09:21:51+13:00
+  - Fix to PDF::COS::DateTime.new
+
+0.4.15  2021-07-29T12:43:43+12:00
+  - Add error check for zero cross reference offset
+  - Change Bufs to Blobs in PDF::IO::Util :&pack and
+    PDF::IO::Filter::Predictors
+  - Fix overflow error in LZW decode filter #30
+
+0.4.14  2021-07-02T13:14:48+12:00
+  - Refix PDF without file associations
+
+0.4.13  2021-07-02T12:07:07+12:00
+  - Fix PDF::IO coercement of Blobs
+  - Ensure a PDF works without file associations. E.g. when rebuilt from:
+    $pdf .= open: $pdf.Blob;
+
+0.4.12  2021-06-24T11:43:44+12:00
+  - Add COERCE method to PDF::IO::Blob, PDF::IO::Handle, PDF::IO:Str
+
+0.4.11  2021-04-28T12:41:23+12:00
+  - Fix writing of enumerated names #29
+
+0.4.10  2021-04-20T06:27:30+12:00
+  - Add --stream option to pdf-rewriter.raku and PDF::IO::Reader
+  - Default to :!stream in save-as() method.
+
+0.4.9  2021-04-19T06:37:06+12:00
+  - Add PDF::IO::Writer stream-cos() and stream-body() methods for chunked
+    saving to a file-handle. Apply to PDF save-as() and update() methods.
+
+0.4.8  2021-04-15T07:09:03+12:00
+  - Enum agnostic array access for latest Rakudo. See
+    https://github.com/rakudo/rakudo/issues/4310
+
+0.4.7  2021-04-14T06:19:49+12:00
+  - Tweak AST construction for latest Rakudo
+
+0.4.6  2021-04-12T12:39:56+12:00
+  - Use Hash::int for PDF::IO::Reader %!ind-obj-idx (indirect
+    object index).
+  - Add $pdf.id rw accessor. In particular, this allows assignment of
+    consistent IDs for the benefit of PDF tool-chain testing.
+
+0.4.5  2021-01-12T06:00:31+13:00
+  - Rename classes PDF::Writer -> PDF::IO::Writer and PDF::Reader
+    -> PDF::IO::Reader. Free up PDF::Reader and PDF::Writer for
+    Raku ecosystem usage.
+
 Release 0.4.4
 - Add COERCE methods to COS roles and classes. For example:
       my PDF::COS::TextString $s .= COERCE: 'Hi';
-  or using Rakudo 2020.11+ coercian semantics:
+  or using Rakudo 2020.11+ coercion semantics:
       my PDF::COS::TextString() $s = 'Hi';
 
 Release 0.4.3
@@ -14,7 +186,7 @@ Release 0.4.3
 - [pdf-rewriter.raku]
   -- added --render option to render and reformat pages.  This option also requires
      an upstream module such as PDF::Lite or PDF::Class.
-  -- Hide backtrace for handled errors (type X::PDF)
+  -- Hide back trace for handled errors (type X::PDF)
 - [PDF::COS::TextString] Decode as UTF16-BE / PDFDoc when input is a byte-string #26
 - [PDF::COS::Util] rename  pack-pp() -> pack-be() [big endian]
 
@@ -36,7 +208,7 @@ Release 0.4.0
 Release 0.3.8
 - [PDF::Writer] - Fixed .write-content() method to sanitise any non-latin
   unicode chars in comment strings, which otherwise breaks serialization.
-  Choosing to map them to #Xxx where Xxx is a hexidecimal number
+  Choosing to map them to #Xxx where Xxx is a hexadecimal number
 - [PDF] Add $.open(:type) option. Asserts that the PDF file is of a given type 'PDF', 'FDF' etc.
 - [pdf-rewriter.p6] --class option changed from a Boolean to a string. Any class
   can now be loaded that is based on PDF (PDF::Lite, PDF::Class, PDF::API6).
@@ -112,12 +284,12 @@ Release 0.3.1
 - Handle utf-16 encoding in PDF::COS::DateString
 
 Release 0.3.0
-- Renamed PDF::DAO classess to PDF::COS, where COS stands for
+- Renamed PDF::DAO classes to PDF::COS, where COS stands for
   Carousel Object System (see
   https://en.wikipedia.org/wiki/Portable_Document_Format#File_structure)
 - Improvements to PDF::COS.coerce($obj, $type) multi methods.
 - Fixed class-level PDF::COS::Stream.gist
-- Support Hybrid PDFs that contain both cross refence tables and streams
+- Support Hybrid PDFs that contain both cross reference tables and streams
 
 Release 0.2.8
 - [PDF::DAO]
@@ -201,7 +373,7 @@ Release 0.0.9
 - withdrew non-standard PDF::DAO::Dict.new( $dict) positionals,
   in favour of PDF::DAO::Dict.new( :$dict ) named arguments.
   Same also for stream and array object constructors.
-- Use of sigel-less variables, where appropriate.
+- Use of sigil-less variables, where appropriate.
 - Revamped handing of PDF::DAO::Tie :entry and :index traits.
 - Fixes for PDF::Storage::Input::Str (byte-string reader) and
   PDF::Storage::Filter::Predictors

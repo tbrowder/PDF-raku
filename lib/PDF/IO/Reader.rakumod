@@ -10,7 +10,7 @@ my sub synopsis($input) {
             ?? $input
             !! [~] $input.&substr(0, 32), ' ... ', $input.&substr(*-20)
     ).subst(/\n+/, ' ', :g);
-    desc.perl;
+    desc.raku;
 }
 
 class X::PDF is Exception { }
@@ -28,6 +28,10 @@ class X::PDF::BadHeader is X::PDF {
 class X::PDF::BadTrailer is X::PDF {
     has Str $.tail is required;
     method message {"Expected file trailer 'startxref ... \%\%EOF', got: {$!tail.&synopsis()}"}
+}
+
+class X::PDF::NoTrailer is X::PDF {
+    method message {"PDF file trailer not found"}
 }
 
 class X::PDF::BadXRef is X::PDF {}
@@ -93,6 +97,7 @@ class X::PDF::ObjStmObject::Parse is X::PDF {
 
 class PDF::IO::Reader {
 
+    use PDF::COS;
     use PDF::Grammar:ver<0.2.1+>;
     use PDF::Grammar::COS;
     use PDF::Grammar::PDF;
@@ -104,33 +109,47 @@ class PDF::IO::Reader {
     use PDF::COS::Dict;
     use PDF::COS::Util :from-ast, :to-ast;
     use PDF::IO::Writer;
+    use Hash::int;
     use JSON::Fast;
     subset ObjNumInt of UInt;
     subset GenNumInt of Int where 0..999;
+    subset StreamAstNode of Pair:D where .key eq 'stream';
 
-    has PDF::IO  $.input is rw;             #= raw PDF image (latin-1 encoding)
+    has PDF::IO  $.input is rw;      #= raw PDF image (latin-1 encoding)
     has Str      $.file-name;
-    has Hash     %!ind-obj-idx{Int}; # keys are: $obj-num*1000 + $gen-num
+    has          %!ind-obj-idx is Hash::int; # keys are: $obj-num*1000 + $gen-num
     has Bool     $.auto-deref is rw = True;
     has Rat      $.version is rw;
     has Str      $.type is rw;       #= 'PDF', 'FDF', etc...
     has uint64   $.prev;             #= xref offset
     has uint     $.size is rw;       #= /Size entry in trailer dict ~ first free object number
-    has uint64    @.xrefs = (0);      #= xref position for each revision in the file
+    has uint64    @.xrefs = (0);     #= xref position for each revision in the file
     has $.crypt is rw;
-    has Version:D $.compat is rw = v1.4;   #= cross reference stream mode
+    has Rat $.compat;        #= cross reference stream mode
+    method compat is rw {
+        Proxy.new: 
+            FETCH => { $!compat // $!version // 1.4 },
+            STORE => -> $, $!compat {}
+        ;
+    }
+    has Lock $!lock .= new;
 
     my enum IndexType <Free External Embedded>;
 
+    submethod TWEAK(PDF::COS::Dict :$trailer) {
+        self!install-trailer($_) with $trailer;
+    }
+
     method actions {
-        state $actions //= PDF::Grammar::PDF::Actions.new
+        state $actions //= PDF::Grammar::PDF::Actions.new: :lite;
     }
 
     method trailer is rw {
         Proxy.new(
             FETCH => {
-                self!install-trailer
-                    without %!ind-obj-idx{0};
+                # vivify
+                self!install-trailer(PDF::COS::Dict.new: :reader(self))
+                    unless %!ind-obj-idx{0}:exists;
                 self.ind-obj(0, 0).object;
             },
             STORE => -> $, \obj {
@@ -139,7 +158,7 @@ class PDF::IO::Reader {
         );
     }
 
-    method !install-trailer(PDF::COS::Dict $object = PDF::COS::Dict.new: :reader(self) ) {
+    method !install-trailer(PDF::COS::Dict $object) {
         %!ind-obj-idx{0} = do {
             my PDF::IO::IndObj $ind-obj .= new( :$object, :obj-num(0), :gen-num(0) );
             %( :type(IndexType::External), :$ind-obj );
@@ -149,16 +168,15 @@ class PDF::IO::Reader {
     method !setup-crypt(Str :$password = '') {
         my Hash $doc = self.trailer;
         with $doc<Encrypt> -> \enc {
-            $!crypt = (require ::('PDF::IO::Crypt::PDF')).new( :$doc );
+            $!crypt = PDF::COS.required('PDF::IO::Crypt::PDF').new( :$doc );
             $!crypt.authenticate( $password );
             my \enc-obj-num = enc.obj-num // -1;
             my \enc-gen-num = enc.gen-num // -1;
 
-            for %!ind-obj-idx.pairs {
-                my ObjNumInt $obj-num = .key div 1000
+            for %!ind-obj-idx.kv -> $k, Hash:D $idx {
+                my ObjNumInt $obj-num = $k div 1000
                     or next;
-                my GenNumInt $gen-num = .key mod 1000;
-                my Hash $idx = .value;
+                my GenNumInt $gen-num = $k mod 1000;
 
                 # skip the encryption dictionary, if it's an indirect object
                 if $obj-num == enc-obj-num
@@ -214,29 +232,28 @@ class PDF::IO::Reader {
     }
 
     #| open the named PDF/FDF file
-    multi method open( Str $!file-name where {!.isa(PDF::IO)}, |c) {
+    multi method open( Str $!file-name where {!.isa(PDF::IO)}, |c) is hidden-from-backtrace {
         $.open( $!file-name.IO, |c );
     }
 
     #| deserialize a JSON dump
-    multi method open(IO::Path $input-path  where .extension.lc eq 'json', |c ) {
+    multi method open(IO::Path $input-path  where .extension.lc eq 'json', |c ) is hidden-from-backtrace {
         my \ast = from-json( $input-path.IO.slurp );
         my \root = ast<cos> if ast.isa(Hash);
         die X::PDF::BadJSON.new( :input-file($input-path.absolute) )
             without root;
         $!type = root<header><type> // 'PDF';
         $!version = root<header><version> // 1.2;
-
         for root<body>.list {
 
             for .<objects>.list.reverse {
                 with .<ind-obj> -> $ind-obj {
                     (my ObjNumInt $obj-num, my GenNumInt $gen-num) = $ind-obj.list;
-
-                    %!ind-obj-idx{$obj-num * 1000 + $gen-num} //= %(
+                    my $k := $obj-num * 1000 + $gen-num;
+                    %!ind-obj-idx{$k} = %(
                         :type(IndexType::External),
                         :$ind-obj,
-                    );
+                    ) unless %!ind-obj-idx{$k}:exists;
                 }
             }
 
@@ -251,7 +268,7 @@ class PDF::IO::Reader {
     }
 
     # process a batch of indirect object updates
-    method update( :@entries!, UInt :$!prev, UInt :$!size ) {
+    method update-index( :@entries!, UInt :$!prev, UInt :$!size ) {
         @!xrefs.push: $!prev;
 
         for @entries -> Hash $entry {
@@ -280,8 +297,8 @@ class PDF::IO::Reader {
         }
     }
 
-    multi method open($input!, |c) {
-        $!input .= COERCE( $input );
+    multi method open($input!, |c) is hidden-from-backtrace {
+        $!input .= COERCE: $input;
         $.load-header( );
         $.load-cos( $.type, |c );
     }
@@ -311,6 +328,7 @@ class PDF::IO::Reader {
 
             # ensure stream is followed by an 'endstream' marker
             my Str \tail = $input.byte-str( $offset + from + length, 20 );
+
             if tail ~~ m{<PDF::Grammar::COS::stream-tail>} {
                 warn X::PDF::BadIndirectObject.new(
                     :$obj-num, :$gen-num, :$offset,
@@ -345,10 +363,12 @@ class PDF::IO::Reader {
 
         given $type {
             when IndexType::External {
+                die X::PDF::BadXRef::Entry.new: :details("Invalid cross-reference offset $offset for $obj-num $gen-num R")
+                    unless $offset > 0;
                 my UInt $obj-len = do given $end - $offset {
-                    when 0     { die X::PDF::BadXRef::Entry.new: :details("Duplicate cross-reference destination (byte offset $offset) for $obj-num $gen-num R")}
+                    when 0     { X::PDF::BadXRef::Entry.new: :details("Duplicate cross-reference destination (byte offset $offset) for $obj-num $gen-num R")}
                     when * < 0 { die X::PDF::BadXRef::Entry.new: :details("Attempt to fetch object $obj-num $gen-num R at byte offset $offset, past end of PDF ($end bytes)") }
-                    default    { $_ - 1 }
+                    default    { $_ }
                 }
 
                 my $input = $!input.byte-str( $offset, $obj-len );
@@ -361,7 +381,7 @@ class PDF::IO::Reader {
                 $actual-gen-num = $ind-obj[1];
 
                 self!fetch-stream-data($ind-obj, $!input, :$offset, :$obj-len)
-                    if $ind-obj[2].key eq 'stream';
+                    if $ind-obj[2] ~~ StreamAstNode;
 
                 with $!crypt {
                     .crypt-ast( (:$ind-obj), :$obj-num, :$gen-num, :mode<decrypt> )
@@ -400,27 +420,29 @@ class PDF::IO::Reader {
         my Hash $idx := %!ind-obj-idx{$obj-num * 1000 + $gen-num}
             // die "unable to find object: $obj-num $gen-num R";
 
-        my $ind-obj;
-        my Bool $have-ast = True;    
-        with $idx<ind-obj> {
-            $ind-obj := $_;
-            $have-ast := False
-                if $ind-obj.isa(PDF::IO::IndObj);
-        }
-        else {
-            return unless $eager;
-            $idx<ind-obj> = $ind-obj := self!fetch-ind-obj(|$idx, :$obj-num, :$gen-num);
-        }
+        $!lock.protect: {
+            my $ind-obj;
+            my Bool $have-ast = True;    
+            with $idx<ind-obj> {
+                $ind-obj := $_;
+                $have-ast := False
+                    if $ind-obj.isa(PDF::IO::IndObj);
+            }
+            else {
+                return unless $eager;
+                $idx<ind-obj> = $ind-obj := self!fetch-ind-obj(|$idx, :$obj-num, :$gen-num);
+            }
 
-        if $get-ast {
-            # AST requested.
-            $have-ast ?? :$ind-obj !! $ind-obj.ast;
-        }
-        else {
-            # Object requested.
-            $have-ast
-                ?? ($idx<ind-obj> = PDF::IO::IndObj.new( :$ind-obj, :reader(self) ))
-                !! $ind-obj;
+            if $get-ast {
+                # AST requested.
+                $have-ast ?? :$ind-obj !! $ind-obj.ast;
+            }
+            else {
+                # Object requested.
+                $have-ast
+                    ?? ($idx<ind-obj> = PDF::IO::IndObj.new( :$ind-obj, :reader(self) ))
+                    !! $ind-obj;
+            }
         }
     }
 
@@ -441,7 +463,7 @@ class PDF::IO::Reader {
                 when Str   { $val{ $_ } }
                 when UInt  { $val[ $_ ] }
                 when Array { $val[ .[0] ] }
-                default    {die "bad \$.deref arg: {.perl}"}
+                default    {die "bad \$.deref arg: {.raku}"}
             };
         }
         $val = self!ind-deref($val)
@@ -466,29 +488,28 @@ class PDF::IO::Reader {
             or PDF::Grammar::COS.subparse($preamble ~ $!input.byte-str(32, 1024), :$.actions, :rule<header>)
             or die X::PDF::BadHeader.new( :$preamble );
         given $/.ast {
-            $.version = .<version>;
-            $.type = .<type>;
+            $!version = .<version>;
+            $!type = .<type>;
         }
     }
 
     #| Load input in FDF (Form Data Definition) format.
     #| Use full-scan mode, as these are not indexed.
     multi method load-cos('FDF') {
-        self!full-scan((require ::('PDF::Grammar::FDF')), $.actions);
+        self!full-scan(PDF::COS.required('PDF::Grammar::FDF'), $.actions);
     }
 
-    #| scan the entire PDF, bypass any indices. Populate index with
-    #| raw ast indirect objects. Useful if the index is corrupt and/or
-    #| the PDF has been hand-created/edited.
-    multi method load-cos('PDF', :$repair! where .so, |c ) {
-        self!full-scan( PDF::Grammar::PDF, $.actions, :repair, |c );
-    }
+     #| Load a regular PDF file, repair or index mode
+     multi method load-cos(
+         'PDF',
+         :$repair, #| scan the PDF, bypass any indices or stream lengths
+         |c ) {
+         $repair
+             ?? self!full-scan( PDF::Grammar::PDF, $.actions, :repair, |c )
+             !! self!load-index( PDF::Grammar::PDF, $.actions, |c );
+     }
 
-    multi method load-cos('PDF', |c ) {
-        self!load-index( PDF::Grammar::PDF, $.actions, |c );
-    }
-
-    multi method load-cos($type, |c) is default {
+    multi method load-cos($type, |c) {
         self!load-index(PDF::Grammar::COS, $.actions, |c );
     }
 
@@ -527,22 +548,21 @@ class PDF::IO::Reader {
 
         $dict = PDF::COS.coerce( |index<trailer>, :reader(self) );
 
-        index<xref>.map: *.<entries>;
+        index<xref>».<entries>;
     }
 
     #| load PDF 1.4- xref table followed by trailer
     #| experimental use of PDF::Native::Reader
-    method !load-xref-table-fast(Str $xref is copy, $dict is rw, :$offset) {
-        state $fast-reader //= (require ::('PDF::Native::Reader')).new;
-
+    method !load-xref-table-fast(Str $xref is copy, $dict is rw, :$offset, :$fast-reader!) {
         # fast load of the xref segments
         my $buf = $xref.encode("latin-1");
-        my array $entries = $fast-reader.read-xref($buf);
+        my array $entries = $fast-reader.read-xref($buf)
+            // die X::PDF::BadXRef::Parse.new( :$offset, :$xref );
         my $bytes = $fast-reader.xref-bytes;
 
         # parse and load the trailer
         my $trailer = $buf.subbuf($bytes).decode("latin-1");
-        my $parse = PDF::Grammar::COS.subparse( $trailer, :rule<trailer>, :$.actions );
+        my $parse = PDF::Grammar::COS.subparse( $trailer.trim, :rule<trailer>, :$.actions );
         die X::PDF::BadXRef::Parse.new( :$offset, :$xref )
             unless $parse;
         my \index = $parse.ast;
@@ -571,28 +591,29 @@ class PDF::IO::Reader {
 
     #| scan indices, starting at PDF tail. objects can be loaded on demand,
     #| via the $.ind-obj() method.
-    method !load-index($grammar, $actions, |c) is default {
+    method !load-index($grammar, $actions, |c) {
         my UInt \tail-bytes = min(1024, $!input.codes);
         my Str $tail = $!input.byte-str(* - tail-bytes);
-
         my UInt %offsets-seen;
         @!xrefs = [];
 
         $grammar.parse($tail, :$actions, :rule<postamble>)
-            or try {
+            or do {
                 CATCH { default {die X::PDF::BadTrailer.new( :$tail ); } }
                 # unable to find 'startxref'
                 # see if the PDF can be loaded sequentially
                 return self!full-scan( $grammar, $actions, |c )
-        }
+            }
 
         $!prev = $/.ast<startxref>;
         my UInt $offset = $!prev;
         my UInt \input-bytes = $!input.codes;
         my UInt @discarded;
-
         my Hash $dict;
         my UInt @ends;
+        state $fast-reader = INIT try { (require ::('PDF::Native::Reader')).new }
+
+        $!compat = $!version // 1.4;
 
         while $offset.defined {
             my array @obj-idx; # array of shaped arrays
@@ -604,10 +625,9 @@ class PDF::IO::Reader {
             if xref ~~ m:s/^ xref/ {
                 # traditional 1.4 cross reference index
                 @obj-idx.append: (
-                PDF::IO::Util::have-pdf-native()
-                    ?? self!load-xref-table-fast( xref, $dict, :$offset)
+                $fast-reader.defined
+                    ?? self!load-xref-table-fast( xref, $dict, :$offset, :$fast-reader)
                     !! self!load-xref-table( xref, $dict, :$offset));
-
                 with $dict<XRefStm> {
                     # hybrid 1.4 / 1.5 with a cross-reference stream
                     # that contains additional objects
@@ -615,12 +635,13 @@ class PDF::IO::Reader {
                     my Str \xref-stm = self!locate-xref(input-bytes, tail-bytes, $tail, $_);
                     @obj-idx.push: self!load-xref-stream(xref-stm, $xref-dict, :offset($_), :@discarded);
                 }
+                $!compat = 1.4 if $!compat > 1.4;
             }
             else {
                 # PDF 1.5+ cross reference stream.
                 # need to write index in same format for Adobe reader (issue #22)
-                $!compat = v1.5;
                 @obj-idx.push: self!load-xref-stream(xref, $dict, :$offset, :@discarded);
+                $!compat = 1.5 if $!compat < 1.5;
             }
 
             self!set-trailer: $dict;
@@ -631,18 +652,21 @@ class PDF::IO::Reader {
                  );
 
             for @obj-idx {
-                for 0 ..^ .elems -> $i {
+                for ^.elems -> $i {
                     my $type := .[$i;Type];
 
                     if $type == IndexType::Embedded {
                         my UInt      $index       := .[$i;Index];
                         my ObjNumInt $ref-obj-num := .[$i;RefObjNum];
-                        %!ind-obj-idx{.[$i;ObjNum] * 1000} //= %( :$type, :$index, :$ref-obj-num );
+                        my $k := .[$i;ObjNum] * 1000;
+                        %!ind-obj-idx{$k} = %( :$type, :$index, :$ref-obj-num )
+                            unless %!ind-obj-idx{$k}:exists;
                     }
                     elsif $type == IndexType::External {
                         my $k := .[$i;ObjNum] * 1000 + .[$i;GenNum];
                         my $offset = .[$i;Offset];
-                        %!ind-obj-idx{$k} //= %( :$type, :$offset );
+                        %!ind-obj-idx{$k} = %( :$type, :$offset )
+                            unless %!ind-obj-idx{$k}:exists;
                         @ends.push: $offset;
                     }
                 }
@@ -709,7 +733,7 @@ class PDF::IO::Reader {
 
                 my $stream-type;
 
-                if $object.key eq 'stream' {
+                if $object ~~ StreamAstNode {
                     my \stream = $object.value;
                     my Hash \dict = stream<dict>;
                     $stream-type = .value with dict<Type>;
@@ -726,11 +750,12 @@ class PDF::IO::Reader {
                     }
                 }
 
-                %!ind-obj-idx{$obj-num * 1000 + $gen-num} //= %(
+                my $k := $obj-num * 1000 + $gen-num;
+                %!ind-obj-idx{$k} = %(
                     :type(IndexType::External),
                     :@ind-obj,
                     :$offset,
-                );
+                ) unless %!ind-obj-idx{$k}:exists;
 
                 with $stream-type {
                     when 'ObjStm' {
@@ -740,11 +765,12 @@ class PDF::IO::Reader {
                         for embedded-objects.kv -> $index, $_ {
                             my ObjNumInt $sub-obj-num = .[0];
                             my ObjNumInt $ref-obj-num = $obj-num;
-                            %!ind-obj-idx{$sub-obj-num * 1000} //= %(
+                            my $k := $sub-obj-num * 1000;
+                            %!ind-obj-idx{$k} = %(
                                 :type(IndexType::Embedded),
                                 :$index,
                                 :$ref-obj-num,
-                            );
+                            ) unless %!ind-obj-idx{$k}:exists;
                         }
                     }
                 }
@@ -754,6 +780,10 @@ class PDF::IO::Reader {
                 my Hash \trailer = PDF::COS.coerce( |$_ );
                 self!set-trailer( trailer.content<dict> );
                 self!setup-crypt(|c);
+            }
+            else {
+                die X::PDF::NoTrailer.new
+                    unless self.trailer;
             }
         }
 
@@ -768,11 +798,11 @@ class PDF::IO::Reader {
         Bool :$eager = ! $incremental,  #| fetch uncached objects
         ) {
         my @object-refs;
-        for %!ind-obj-idx.pairs.sort {
-            my ObjNumInt $obj-num = .key div 1000;
-            my GenNumInt $gen-num = .key mod 1000;
+        for %!ind-obj-idx.keys.sort {
+            my Hash:D $entry = %!ind-obj-idx{$_};
+            my ObjNumInt $obj-num = $_ div 1000;
+            my GenNumInt $gen-num = $_ mod 1000;
 
-            my Hash $entry = .value;
             my UInt $seq = 0;
             my UInt $offset;
 
@@ -795,7 +825,7 @@ class PDF::IO::Reader {
                     next;
                 }
                 default {
-                    die "unknown ind-obj index <type> $obj-num $gen-num: {.perl}"
+                    die "unknown ind-obj index <type> $obj-num $gen-num: {.raku}"
                 }
             }
 
@@ -811,8 +841,8 @@ class PDF::IO::Reader {
                     }
                 }
             }
-            else {
-                next if $incremental;
+            elsif $incremental {
+                next;
             }
 
             if $incremental && $offset && $obj-num {
@@ -827,9 +857,7 @@ class PDF::IO::Reader {
         }
 
         # preserve file order
-        my @objects = @object-refs.list.sort(*.key).map: *.value;
-
-        @objects;
+        my @ = @object-refs.list.sort(*.key)».value;
     }
 
     #| get just updated objects. return as indirect objects
@@ -849,7 +877,7 @@ class PDF::IO::Reader {
         for self.get-objects
             .grep(*.key eq 'ind-obj')
             .map(*.value)
-            .grep(*.[2].key eq 'stream') {
+            .grep: {.[2] ~~ StreamAstNode} {
 
             my ObjNumInt \obj-num = .[0];
             my GenNumInt \gen-num = .[1];
@@ -866,18 +894,17 @@ class PDF::IO::Reader {
         }
     }
 
-    method ast( Bool :$rebuild, |c ) {
-        my PDF::IO::Serializer $serializer .= new: :reader(self);
+    method ast(::CLASS:D $reader: Bool :$rebuild, |c ) {
+        my PDF::IO::Serializer $serializer .= new: :$reader;
 
         my Array $body = $rebuild
-            ?? $serializer.body( self.trailer, |c )
+            ?? $serializer.body( $reader.trailer, |c )
             !! $serializer.body( |c );
 
         .crypt-ast('body', $body, :mode<encrypt>)
-            with self.crypt;
-
+            with $reader.crypt;
         :cos{
-            :header{ :$.type, :$.version },
+            :header{ :$.type, :$!version },
             :$body,
         }
     }
@@ -889,10 +916,17 @@ class PDF::IO::Reader {
     }
 
     #| write to PDF/FDF
-    multi method save-as(IO() $output-path, |c ) is default {
+    multi method save-as(IO() $output-path, :$stream, |c ) {
         my $ast = $.ast(:!eager, |c);
-        my PDF::IO::Writer $writer .= new: :$!input, :$ast;
-        $output-path.spurt: $writer.Blob;
+        my PDF::IO::Writer $writer .= new: :$!input, :$ast, :$.compat;
+        if $stream {
+            my $ioh = $output-path.open(:w, :bin);
+            $writer.stream-cos: $ioh, $ast<cos>;
+            $ioh.close;
+        }
+        else {
+            $output-path.spurt: $writer.Blob;
+        }
         $writer;
     }
 

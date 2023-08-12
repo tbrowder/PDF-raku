@@ -3,6 +3,7 @@
 
 [![Actions Status](https://github.com/pdf-raku/PDF-raku/workflows/test/badge.svg)](https://github.com/pdf-raku/PDF-raku/actions)
 
+=======
 
 PDF-raku
 ========
@@ -67,7 +68,7 @@ $info.CreationDate = DateTime.now;
 $info.Producer = "Raku PDF";
 
 # define some basic content
-my PDF::COS::Stream $Contents .= COERCE: { :decoded("BT /F1 24 Tf  15 25 Td (Hello, world!) Tj ET" ) };
+my PDF::COS::Stream() $Contents = { :decoded("BT /F1 24 Tf  15 25 Td (Hello, world!) Tj ET" ) };
 
 # create a new page. add it to the page tree
 $page-index<Kids>.push: { :Type(/'Page'), :Parent($page-index), :$Contents };
@@ -94,7 +95,7 @@ my $catalog = $pdf<Root>;
 my $Parent = $catalog<Pages>;
 
 # create additional content, use existing font /F1
-my PDF::COS::Stream $Contents .= COERCE: { :decoded("BT /F1 16 Tf  15 25 Td (Goodbye for now!) Tj ET" ) };
+my PDF::COS::Stream() $Contents = { :decoded("BT /F1 16 Tf  15 25 Td (Goodbye for now!) Tj ET" ) };
 
 # create a new page. add it to the page-tree
 $Parent<Kids>.push: { :Type( :name<Page> ), :$Parent, :$Contents };
@@ -119,7 +120,7 @@ PDF files are also indexed for random access and may also have internal compress
 
 They have a reasonably well specified structure. The document starts from the `Root` entry in the trailer dictionary, which is the main entry point into a PDF.
 
-This module is based on the [PDF PDF 32000-1:2008 1.7](http://www.adobe.com/content/dam/Adobe/en/devnet/acrobat/pdfs/PDF32000_2008.pdf) specification. It implements syntax, basic data-types, serialization and encryption rules as described in the first four chapters of the specification. Read and write access to data structures is via direct manipulation of tied arrays and hashes.
+This module is based on the [PDF 32000-1:2008 1.7](https://opensource.adobe.com/dc-acrobat-sdk-docs/standards/pdfstandards/pdf/PDF32000_2008.pdf) specification. It implements syntax, basic data-types, serialization and encryption rules as described in the first four chapters of the specification. Read and write access to data structures is via direct manipulation of tied arrays and hashes.
 
 ## The Basics
 
@@ -205,7 +206,7 @@ The PDF is composed of a series indirect objects, for example, the first object 
 >> endobj
 ```
 
-It's an indirect object with object number `1` and generation number `0`, with a `<<` ... `>>` delimited dictionary containing the author and the date that the document was created. This PDF dictionary is roughly equivalent to a Raku hash:
+It's an indirect object with object number `1` and generation number `0`, with a `<<` ... `>>` delimited dictionary containing the author and the date that the document was created. This PDF dictionary is roughly equivalent to the Raku hash:
 
 ``` { :CreationDate("D:20151225000000Z00'00'"), :Producer("Raku PDF"), } ```
 
@@ -224,9 +225,10 @@ startxref
 %%EOF
 ```
 
-The `<<` ... `>>` delimited section is the trailer dictionary and the main entry point into the document. The entry `/Info 1 0 R` is an indirect reference to the first object (object number 1, generation 0) described above.
+The `<<` ... `>>` delimited section is the trailer dictionary and the main entry point into the document. The entry `/Info 1 0 R` is an indirect reference to the first object (object number 1, generation 0) described above. The entry `/Root 2 0 R` points the root of the actual PDF document,
+commonly known as the Document Catalog.
 
-Immediately above this is the cross reference table:
+Immediately above the trailer is the cross reference table:
 
 ```
 xref
@@ -287,10 +289,11 @@ The page `/Contents` entry is a PDF stream which contains graphical instructions
 This performs an incremental update to the input pdf, which must be indexed `PDF` (not applicable to PDFs opened with `:repair`, FDF or JSON files). A new section is appended to the PDF that contains only updated and newly created objects. This method can be used as a fast and efficient way to make small updates to a large existing PDF document.
     - `:diffs(IO::Handle $fh)` - saves just the updates to an alternate location. This can be later appended to the base PDF to reproduce the updated PDF.
 
-- `$pdf.save-as("mydoc-2.pdf", :compress, :rebuild, :preserve)`
+- `$pdf.save-as("mydoc-2.pdf", :compress, :stream, :preserve, :rebuild)`
 Saves a new document, including any updates. Options:
   - `:compress` - compress objects for minimal size
   - `:!compress` - uncompress objects for human readability
+  - `:stream` - write the PDF progressively
   - `:preserve` - copy the input PDF, then incrementally update. This is generally faster and ensures that any digital signatures are not invalidated,
   - `:rebuild` - discard any unreferenced objects. renumber remaining objects. It may be a good idea to rebuild a PDF Document, that's been incrementally updated a number of times.
 
@@ -325,7 +328,7 @@ $reader.trailer<Info><Creator> = PDF::COS::Name.COERCE: 't/helloworld.t';
 ```
 
 ### Utility Scripts
-- `pdf-rewriter.raku [--repair] [--rebuild] [--[/]compress] [--password=Xxx] [--decrypt] [--class=Module] [--render] <pdf-or-json-file-in> [<pdf-or-json-file-out>]`
+- `pdf-rewriter.raku [--repair] [--rebuild] [--stream] [--[/]compress] [--password=Xxx] [--decrypt] [--class=Module] [--render] <pdf-or-json-file-in> [<pdf-or-json-file-out>]`
 This script is a thin wrapper for the `PDF` `.open` and `.save-as` methods. It can typically be used to:
   - uncompress or render a PDF for human readability
   - repair a PDF who's cross-reference index or stream lengths have become invalid
@@ -371,69 +374,10 @@ Note that it's quite common to leave the user-password blank. This indicates tha
 
 An encrypted PDF can be saved as JSON. It will remain encrypted and passwords may be required, to reopen it.
 
-## Data-types and Coercion
+## Built-in objects
 
-The `PDF::COS` name-space provides roles and classes for the representation and manipulation of PDF objects.
-
-[COS (Carousel Object System) is the original name for the file structure and object system used for PDF and FDF files - see https://en.wikipedia.org/wiki/Portable_Document_Format#File_structure].
-
-```
-use PDF::COS::Stream;
-my %dict = :Filter( :name<ASCIIHexDecode> );
-my $obj-num = 123;
-my $gen-num = 4;
-my $decoded = "100 100 Td (Hello, world!) Tj";
-my PDF::COS::Stream $stream-obj .= COERCE: %( :$obj-num, :$gen-num, :%dict, :$decoded );
-say $stream-obj.encoded;
-```
-
-The various `PDF::COS` objects all have a `COERCE` method for the construction of objects.
-
-```
-my PDF::COS::Dict $dict .= COERCE: {
-     :Type( :name<Pages> ),
-     :Count(:int(1)),
-     :Kids[ :array[ :ind-ref[4, 0] ] ],
-};
-```
-
-`COERCE()` acts recursively on container objects (arrays, dictionarys and streams).
-
-```
-# same but with default coercements
-my PDF::COS::Dict $dict2 .= COERCE: {
-    :Type( :name<Pages> ),
-    :Count(1),
-    :Kids[ :ind-ref[4, 0],  ]
-};
-```
-
-In Rakudo 2020.11+, there is usually no need to invoke the COERCE() method explicitly:
-
-    my PDF::COS::Dict() $dict3 = {
-        :Type( :name<Pages> ),
-        :Count(1),
-        :Kids[ :ind-ref[4, 0],  ]
-    };
-
-
-A table of Object types and coercements follows:
-
-*AST Tag* | Object Role/Class | *Raku Type Coercion | PDF Example | Description |
---- | --- | --- | --- | --- |
- `array` | PDF::COS::Array | Array | `[ 1 (foo) /Bar ]` | array objects
-`bool` | PDF::COS::Bool | Bool | `true`
-`int` | PDF::COS::Int | Int | `42`
-`literal` | PDF::COS::ByteString (literal) | Str | `(hello world)`
-`literal` | PDF::COS::DateString | DateTime | `(D:199812231952-08'00')`
-`hex-string` | PDF::COS::ByteString (hex-string) | | `<736E6F6f7079>`
-`dict` | PDF::COS::Dict | Hash | `<< /Length 42 /Apples(oranges) >>` | abstract class for dictionary based indirect objects. Root Object, Catalog, Pages tree etc.
-`name` | PDF::COS::Name | | `/Catalog`
-`null` | PDF::COS::Null | Any | `null`
-`real` | PDF::COS::Real | Numeric | `3.14159`
-`stream`| PDF::COS::Stream | | | abstract class for stream based indirect objects - base class from Xref and Object streams, fonts and general content.
-
-`PDF::COS` also provides a few essential derived classes, that form part of the basic PDF infrastructure.
+`PDF::COS` also provides a few essential derived classes, that are needed read and write PDF files,
+including encryption, object streams and cross reference streams.
 
 *Class* | *Base Class* | *Description*
 --- | --- | --- |
@@ -447,7 +391,7 @@ PDF::COS::TextString | PDF::COS::ByteString | Implements the 'text-string' data-
 ## Further Reading
 
 - [PDF Explained](http://shop.oreilly.com/product/0636920021483.do) By John Whitington (120pp) - Offers an excellent overview of the PDF format.
-- [PDF Reference version 1.7](http://www.adobe.com/content/dam/Adobe/en/devnet/acrobat/pdfs/pdf_reference_1-7.pdf) Adobe Systems Incorporated - This is the main reference used in the construction of this module.
+- [PDF 32000-1:2008 1.7](https://opensource.adobe.com/dc-acrobat-sdk-docs/standards/pdfstandards/pdf/PDF32000_2008.pdf) specification - This is the main reference used in the construction of this module.
 
 ## See also
 - [PDF::Lite](https://pdf-raku.github.io/PDF-Lite-raku) - basic graphics; including images, fonts, text and general graphics

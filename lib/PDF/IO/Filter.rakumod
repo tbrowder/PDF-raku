@@ -8,11 +8,11 @@ class PDF::IO::Filter {
     use PDF::IO::Filter::RunLength;
     use PDF::IO::Filter::LZW;
 
-    method decode( $input, Hash :$dict ) is default {
+    method decode( $input, Hash :$dict ) {
         with $dict<Filter> {
             when Str  { self!decode-item( $input, |$dict) }
             when List { self!decode-list( $input, |$dict) }
-            default { die "bad filter: {.perl}" }
+            default { die "bad filter: {.raku}" }
         }
         else {
             # nothing to do
@@ -43,7 +43,7 @@ class PDF::IO::Filter {
         $data;
     }
 
-    method encode( $input, Hash :$dict ) is default {
+    method encode( $input, Hash :$dict ) {
         with $dict<Filter> {
             when Str  { self!encode-item( $input, |$dict) }
             when List { self!encode-list( $input, |$dict) }

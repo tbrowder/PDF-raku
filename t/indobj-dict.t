@@ -1,6 +1,6 @@
 use v6;
 use Test;
-plan 27;
+plan 29;
 
 use PDF::IO::IndObj;
 use PDF::COS::Util :to-ast;
@@ -15,6 +15,7 @@ sub ind-obj-tests( :$ind-obj!, :$class!, :$to-json) {
     my PDF::IO::IndObj $dict-obj .= new( :$ind-obj, :$reader );
     my $object = $dict-obj.object;
     isa-ok $object, $class;
+    is-deeply $object.reader, $reader, 'reader stickeyness';
     is $dict-obj.obj-num, $ind-obj[0], '$.obj-num';
     is $dict-obj.gen-num, $ind-obj[1], '$.gen-num';
     is-json-equiv $dict-obj.object, $to-json, 'object to json';
@@ -23,7 +24,7 @@ sub ind-obj-tests( :$ind-obj!, :$class!, :$to-json) {
 }
 
 ind-obj-tests(
-    :ind-obj[ 21, 0, :dict{ D => :array[ :ind-ref[216, 0], :name<XYZ>, :int(0), :int(441), :null(Any)],
+    :ind-obj[ 21, 0, :dict{ D => :array[ :ind-ref[216, 0], :name<XYZ>, 0, 441, Any],
                             S => :name<GoTo>}],
     :class(PDF::COS::Dict),
     :to-json{ :D[ :ind-ref[216, 0], "XYZ", 0, 441, Any], :S<GoTo> },
@@ -98,14 +99,15 @@ my PDF $pdf .= new( :%dict );
 my PDF::IO::Serializer $serializer .= new;
 my $body = $serializer.body( $pdf );
 
-is-json-equiv $body[0], {:objects[
-			       :ind-obj($[1, 0, :dict{ :NeedsRendering(:bool),
-							 :Pages(:ind-ref($[2, 0]))}
-                                                      ]),
-                               :ind-obj($[2, 0, :dict{ :Kids(:array($[:ind-ref($[3, 0])])),
-                                                         :Resources{ :dict{ :ExtGState{ :dict{} } } },
-                                                      }]),
-                               :ind-obj($[3, 0, :dict{ :Type(:name("Page"))}])
-                              ],
-                       :trailer{ :dict{:Root(:ind-ref($[1, 0])), :Size(:int(4))}} 
-                     }, 'body serialization';
+is-json-equiv $body[0], {
+    :objects[
+	     :ind-obj($[1, 0, :dict{ :NeedsRendering,
+				     :Pages(:ind-ref($[2, 0]))}
+                       ]),
+             :ind-obj($[2, 0, :dict{ :Kids(:array($[:ind-ref($[3, 0])])),
+                                     :Resources{ :dict{ :ExtGState{ :dict{} } } },
+                                   }]),
+             :ind-obj($[3, 0, :dict{ :Type(:name("Page"))}])
+         ],
+    :trailer{ :dict{:Root(:ind-ref($[1, 0])), :Size(4)}} 
+}, 'body serialization';

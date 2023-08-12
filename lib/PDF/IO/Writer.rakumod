@@ -3,22 +3,45 @@ use v6;
 class PDF::IO::Writer {
 
     use PDF::Grammar:ver(v0.2.1+);
+    use PDF::COS;
     use PDF::IO;
-    use PDF::IO::Util;
     use PDF::COS::Type::XRef;
     use PDF::IO::IndObj;
-
     has PDF::IO $!input;
     has $.ast is rw;
     has UInt $.offset;
     has UInt $.prev;
     has UInt $.size;
     has Str  $.indent is rw = '';
-    has Version $.compat = v1.4;
+    has Rat $.compat is rw = 1.4;
+
+    my Lock $lock .= new;
+
+    #| optional role to apply when LibXML::Native is available
+    role Native[$writer] {
+        # load some native faster alternatives
+
+        method write-bool($_)       { $writer.write-bool($_) }
+        method write-hex-string($_) { $writer.write-hex-string($_) }
+        method write-literal($_)    { $writer.write-literal($_) }
+        method write-name($_)       { $writer.write-name($_) }
+        method write-int($_)        { $writer.write-int($_) }
+        method write-real($_)       { $writer.write-real($_) }
+        method write-entries($_)    { $writer.write-entries($_) }
+    }
 
     submethod TWEAK(:$input) {
-        $!input .= COERCE( $_ )
-            with $input;
+        $!input .= COERCE: $_
+           with $input;
+
+        $lock.protect: {
+            # No thread-safe on older Rakudos
+            given try {require ::('PDF::Native::Writer')} -> $writer {
+                unless $writer === Nil {
+                    self does Native[$writer];
+                }
+            }
+        }
     }
 
     method Str returns Str {
@@ -37,8 +60,8 @@ class PDF::IO::Writer {
     }
 
     method write-array(List $_ ) {
-	temp $!indent ~= '  ';  # for indentation of child dictionarys
-	('[', .map({ $.write($_) }), ']').join: ' ';
+	temp $!indent ~= '  ';  # for indentation of child dictionaries
+	('[', .map({ $.write($_) }).Slip, ']').join: ' ';
     }
 
     multi method write-body(List $_, |c ) {
@@ -67,57 +90,61 @@ class PDF::IO::Writer {
         @out.join: "\n";
     }
 
+    method !make-object($obj, @idx) {
+        do with $obj<ind-obj> -> $ind-obj {
+            # serialization of in-memory object
+            my uint $obj-num = $ind-obj[0];
+            my uint $gen-num = $ind-obj[1];
+            @idx.push: %( :type(1), :$!offset, :$gen-num, :$obj-num, :$ind-obj );
+
+            $.write-ind-obj( $ind-obj );
+        }
+        elsif $obj<copy> -> \ref {
+            # direct copy of raw object from input to output
+            my uint $obj-num = ref[0];
+            my uint $gen-num = ref[1];
+            my $getter = ref[2];
+            my $ind-obj = $getter.get($obj-num, $gen-num);
+            @idx.push: %( :type(1), :$!offset, :$gen-num, :$obj-num, :$ind-obj );
+            $.write-ind-obj( $ind-obj );
+        }
+        elsif $obj<comment> -> \comment {
+            $.write-comment(comment);
+        }
+        else {
+            die "don't know how to serialize body component: {$obj.raku}"
+        }
+    }
+
     method !make-objects( @objects, @idx = [] ) {
         @objects.map: -> $obj is rw {
-            my \bytes = do with $obj<ind-obj> -> $ind-obj {
-                # serialization of in-memory object
-		my uint $obj-num = $ind-obj[0];
-		my uint $gen-num = $ind-obj[1];
-		@idx.push: %( :type(1), :$!offset, :$gen-num, :$obj-num, :$ind-obj );
-
-                $.write-ind-obj( $ind-obj );
-            }
-            elsif my \ref = $obj<copy> {
-                # direct copy of raw object from input to output
-		my uint $obj-num = ref[0];
-		my uint $gen-num = ref[1];
-                my $getter = ref[2];
-                my $ind-obj = $getter.get($obj-num, $gen-num);
-		@idx.push: %( :type(1), :$!offset, :$gen-num, :$obj-num, :$ind-obj );
-                $.write-ind-obj( $ind-obj );
-            }
-            elsif my \comment = $obj<comment> {
-                $.write-comment(comment);
-            }
-            else {
-                die "don't know how to serialize body component: {$obj.perl}"
-            }
-
+            my \bytes = self!make-object($obj, @idx);
             $!offset += bytes.codes + 1;
             bytes;
         }
     }
 
     method !make-trailer($dict, @idx) {
-        $!compat >= v1.5
+        $!compat >= 1.5
             ?? self!make-trailer-stream($dict, @idx)
             !! self!make-trailer-xref($dict, @idx);
     }
 
     #| build a PDF 1.5+ Cross Reference Stream
-    method !make-trailer-stream( Hash $trailer, @idx ) {
+    method !make-trailer-stream( Hash $trailer, @idx is copy) {
 	my UInt \startxref = $.offset;
         my %dict = %$trailer<dict>;
         my PDF::COS::Type::XRef $xref .= new: :%dict;
         $xref.Filter = 'FlateDecode';
         my $n := +@idx;
         my uint64 @xref-index[$n;4];
+        @idx .= sort: { .<obj-num> };
         with @idx.tail<obj-num> {
             $!size = $_ + 1
                 if !$!size || $!size <= $_;
         }
 
-        for 0 ..^ $n -> $i {
+        for ^$n -> $i {
             my $idx := @idx[$i];
             my UInt $type := $idx<type>;
             my $obj-num := $idx<obj-num>;
@@ -154,9 +181,10 @@ class PDF::IO::Writer {
 
     #| Build a PDF 1.4- Cross Reference Table
     method !make-trailer-xref( Hash $trailer, @idx ) {
-        my uint $total-entries = +@idx;
-	my uint64 @idx-sorted[+$total-entries;4] = @idx.sort({ $^a<obj-num> <=> $^b<obj-num> || $^a<gen-num> <=> $^b<gen-num> })
-                                                       .map: {[.<type>, .<obj-num>, .<gen-num>, .<offset> ]};
+        my $total-entries = +@idx;
+	my uint64 @idx-sorted[$total-entries;4] = @idx
+            .map({[.<type>, .<obj-num>, .<gen-num>, .<offset> ]})
+            .sort({ $^a[1] <=> $^b[1] || $^a[2] <=> $^b[2] });
 
 	my Str \xref-str = self!write-xref-segments: self!xref-segments( @idx-sorted );
 	my UInt \startxref = $.offset;
@@ -185,7 +213,8 @@ class PDF::IO::Writer {
     }
 
     multi method write-content($_ where Pair | Hash) {
-        my ($op, $args) = .kv;
+        ##        my :($op, $args) := .kv; # needs Rakudo > 2020.12
+        my ($op, $args) := .kv;
         $args //= [];
         $.write-op($op, |@$args);
     }
@@ -210,7 +239,7 @@ class PDF::IO::Writer {
         "ID\n" ~ $image-data<encoded>;
     }
 
-    multi method write-op(Str $op, *@args) is default {
+    multi method write-op(Str:D $op, *@args) {
         my @vals;
         my @comments;
         for @args -> \arg {
@@ -223,14 +252,13 @@ class PDF::IO::Writer {
         }
 
         my @out = @vals.map: {$.write($_)};
-        @out.push: $.write-op( $op );
-        @out.push: $.write-comment( @comments.join(' ') )
-            if @comments;
+        @out.push: $op;
+        if @comments -> $_ {
+            @out.push: $.write-comment( .join(' ') )
+        }
 
         @out.join: ' ';
     }
-
-    multi method write-op( Str $_ ) { .Str }
 
     multi method write-comment(List $_) {
         .map({ $.write-comment($_) }).join: "\n";
@@ -254,21 +282,23 @@ class PDF::IO::Writer {
             default                  {$_}
         };
         my $pad = $!indent;
-        temp $!indent ~= '  ';  # for indentation of child dictionarys
-        my @entries = @keys.map({ $.write-name($_) ~ ' ' ~ $.write( $dict{$_} ); });
+        temp $!indent ~= '  ';  # for indentation of child dictionaries
+        my @entries = @keys.map: { $.write-name($_) ~ ' ' ~ $.write: $dict{$_} };
         my $len = $!indent;
+        my Bool $multi-line;
         for @entries {
             $len += .chars;
-            last if $len > 64;
+            if $len > 64 {
+                $multi-line = True;
+                last;
+            }
         }
 
-        $len > 64
+        $multi-line
             ?? join("\n", '<<', @entries.map({$!indent ~ $_}), $pad ~ '>>')
             !! join(' ', '<<', @entries, '>>');
     }
 
-    #| invertors for PDF::Grammar::Function expr term
-    #| an array is a sequence of sub-expressions
     multi method write-expr(List $_) {
 	[~] '{ ', .map({ $.write($_) }).join(' '), ' }';
     }
@@ -287,13 +317,13 @@ class PDF::IO::Writer {
 
 
     method write-hex-string( Str $_ ) {
-        [~] flat '<', .encode("latin-1").map({ 
-            .fmt: '%02x';
-        }), '>';
+        [~] ('<',
+             slip(.encode("latin-1").map(*.fmt('%02x'))),
+             '>');
     }
 
     method write-ind-obj(@_) {
-        my (UInt \obj-num, UInt \gen-num, \object where Pair | Hash) = @_;
+        my (UInt \obj-num, UInt \gen-num, \object) = @_;
 
         "%d %d obj\n%s\nendobj\n".sprintf(obj-num, gen-num, $.write( object ));
     }
@@ -311,16 +341,13 @@ class PDF::IO::Writer {
         ~ ')';
     }
 
-    constant Name-Reg-Chars = set ('!'..'~').grep: { $_ !~~ /<PDF::Grammar::char-delimiter>/};
-
+    my token name-esc-seq {
+        <-[\! .. \~] +[( ) < > \[ \] { } / %]>+
+    }
     method write-name( Str $_ ) {
-        [~] flat '/', .comb.map( {
-            when $_ ∈ Name-Reg-Chars { $_ }
-            when '#' { '##' }
-            default {
-                .encode.list.map(*.fmt('#%02x')).join: '';
-            }
-        } )
+        '/' ~
+        .subst('#', '##', :g)
+        .subst(/<name-esc-seq>/, {.Str.encode.map(*.fmt('#%02x')).join: ''}, :g);
     }
 
     method write-null( $ ) { 'null' }
@@ -334,6 +361,59 @@ class PDF::IO::Writer {
 	my Bool $write-xref = type ne 'FDF';
         my \body = $.write-body( $body, :$write-xref );
         (header, comment, body).join: "\n";
+    }
+
+    sub print-bytes(IO::Handle:D $fh, Str $chunk) {
+        CATCH {
+            default {
+                note "error printing {$chunk.raku}";
+                .rethrow();
+            }
+        }
+        my $buf = $chunk.encode('latin-1');
+        $fh.write: $buf;
+        $buf.bytes;
+    }
+
+    sub say-bytes(IO::Handle:D $fh, Str $chunk) {
+        print-bytes($fh, $chunk) + print-bytes($fh, "\n");
+    }
+
+    multi method stream-cos(IO::Handle:D $fh, % (:$header!, :$body!, :$comment = q<%¥±ë¼>) ) {
+        my Str \type = $header<type> // 'PDF';
+        # Form Definition Format is normally written without an xref
+	my Bool $write-xref = type ne 'FDF';
+        temp $!offset;
+        temp $!prev;
+
+        $fh.&say-bytes: $.write-header($header);
+        $fh.&say-bytes: $.write-comment($comment);
+
+        self.stream-body: $fh, $body, my @idx, :$write-xref;
+    }
+
+    multi method stream-cos(IO::Handle:D $fh) {
+        $.stream-cos($fh, $!ast<cos>);
+    }
+
+    multi method stream-body(IO::Handle:D $fh, @body, |c) {
+        self.stream-body: $fh, $_, |c for @body;
+    }
+
+    multi method stream-body(IO::Handle:D $fh, %body, @idx, Bool :$write-xref = True, :$!offset = $fh.tell) {
+        @idx.unshift: { :type(0), :offset(0), :gen-num(65535), :obj-num(0) };
+
+        for %body<objects>.list {
+            $!offset += $fh.&say-bytes: self!make-object($_, @idx);
+        }
+        my \trailer-dict = %body<trailer> // {};
+        if $write-xref {
+            $fh.&print-bytes: self!make-trailer(trailer-dict, @idx);
+        }
+        else {
+            $fh.&print-bytes: $.write-trailer(trailer-dict);
+            $fh.&print-bytes: '%%EOF';
+        }
     }
 
     method write-header($_ ) {
@@ -359,7 +439,7 @@ class PDF::IO::Writer {
         [~] $.write-dict(%dict), " stream\n", $data, "\nendstream";
     }
 
-    method write-trailer(% (:%dict), :$prev) is default {
+    method write-trailer(% (:%dict!), :$prev) {
 
         %dict<Prev> = :int($_)
             with $prev;
@@ -396,7 +476,7 @@ class PDF::IO::Writer {
 	    # [ PDF 32000 7.5.4 Cross-Reference Table:
 	    # "Each cross-reference subsection contains entries for a contiguous range of object numbers"]
             my uint64 @entries[$obj-count;3];
-            for 0 ..^ $obj-count {
+            for ^$obj-count {
                 my uint8  $type    = @idx[$i;0];
                 my uint32 $gen-num = @idx[$i;2];
                 my uint64 $offset  = @idx[$i;3];
@@ -419,12 +499,12 @@ class PDF::IO::Writer {
         die "xref $obj-count != {$entries.elems}"
             unless $obj-count == +$entries;
          $obj-first-num ~ ' ' ~ $obj-count ~ "\n"
-             ~ self!write-entries($entries );
+             ~ self!write-entries($entries);
     }
 
     method !write-entries($_ where .shape[1] ~~ 3) {
-        enum Str ( :Free<f>, :Inuse<n> );
-        ((0 ..^ .elems).map: -> int $i {
+        my Str enum ObjectType ( :Free<f>, :Inuse<n> );
+        ((^.elems).map: -> int $i {
             my uint64 $offset  = .[$i;0];
             my uint32 $gen-num = .[$i;1];
             my uint32 $type    = .[$i;2];
@@ -444,33 +524,40 @@ class PDF::IO::Writer {
 
     proto method write(|c) returns Str {*}
 
-    constant fast-track = set <hex-string literal name real entries>;
+    multi method write(Bool:D $_)    { $.write-bool($_); }
+    multi method write(Int:D $_)     { $.write-int($_); }
+    multi method write(Numeric:D $_) { $.write-real($_); }
+    multi method write(Any:U $_)     { $.write-null($_); }
 
-    multi method write( Pair $_!) {
-        state $fast-writer;
-        state $have-pdf-native //= PDF::IO::Util::have-pdf-native()
-        ?? do { $fast-writer = (require ::('PDF::Native::Writer')); True }
-        !! False;
-        
-        given ($have-pdf-native && .key ∈ fast-track
-               ?? $fast-writer
-               !! self) -> $writer {
-            $writer."write-{.value.defined ?? .key !! 'null'}"( .value );
+    multi method write(Pair $_) {
+        .value.defined
+            ?? self."write-{.key}"( .value )
+            !! self.write-null(Any);
+    }
+
+    multi method write(%ast where .elems == 1) {
+        $.write: %ast.pairs[0];
+    }
+    multi method write(%ast is copy) is DEPRECATED {
+        my $key = %ast.keys.sort.first({ $.can("write-$_") })
+            or die "unable to handle {%ast.keys} struct: {%ast.raku}";
+        my $val = %ast{$key}:delete;
+        self."write-$key"($val, |%ast);
+    }
+
+    multi method write(*%ast where .so) is DEPRECATED {
+        $.write: %ast;
+    }
+    multi method write($_, *@) {
+        die "unable to write: {.raku}";
+    }
+    multi method write {
+        with $!ast {
+            self.write: $_;
         }
-    }
-
-    multi method write( Hash $ast!) {
-        $.write( |$ast );
-    }
-
-    multi method write( *@args, *%opt ) is default {
-        die "unexpected arguments: {[@args].perl}"
-            if @args;
-
-        my $key = %opt.keys.sort.first({  $.can("write-$_") })
-            or die "unable to handle {%opt.keys} struct: {%opt.perl}";
-        my $val = %opt{$key}:delete;
-        self."write-$key"($val, |%opt);
+        else {
+            die "nothing to write";
+        }
     }
 
     #| handle indentation.

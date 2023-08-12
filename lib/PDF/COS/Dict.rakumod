@@ -10,40 +10,40 @@ class PDF::COS::Dict
     does PDF::COS
     does PDF::COS::Tie::Hash {
 
-    use PDF::COS::Util :from-ast, :ast-coerce;
+    use PDF::COS::Util :&from-ast, :&ast-coerce;
+    my %seen{Hash} = (); #= to catch circular references
+    my Lock $seen-lock .= new;
 
-    my %seen{Any} = (); #= to catch circular references
-
-    submethod TWEAK(:$dict!) {
+    submethod TWEAK(:$dict!, :$seen-lock) {
         %seen{$dict} = self;
+        .unlock with $seen-lock;
         self.tie-init;
         my %entries := self.entries;
-        my %alias = %entries.pairs.map({ .value.cos.alias => .key}).grep(*.key);
+        my %alias := self.aliases;
         # this may trigger cascading PDF::COS::Tie coercians
         # e.g. native Array to PDF::COS::Array
         self{%alias{.key} // .key} = from-ast(.value) for $dict.pairs.sort;
         self.?cb-init;
 
-	if my $required = set %entries.pairs.grep(*.value.cos.is-required).map(*.key) {
-	    my $missing = $required (-) self.keys;
-	    die "{self.WHAT.^name}: missing required field(s): $missing"
-	    if $missing;
+	if self.required-entries -> $required  {
+	    my @missing = $required.keys.grep: {self{$_}:!exists};
+	    die "{self.WHAT.^name}: missing required field(s): {@missing.sort.join: ','}"
+	        if @missing;
 	}
     }
 
     method new(Hash() :$dict = {}, |c) {
-        %seen{$dict} // do {
-            temp %seen{$dict};
-            self.bless(:$dict, |c);
+        $seen-lock.lock;
+        with %seen{$dict} -> $obj {
+            $seen-lock.unlock;
+            $obj;
+        }
+        else {
+            LEAVE $seen-lock.protect: { %seen{$dict}:delete }
+            self.bless(:$dict, :$seen-lock, |c);
         }
     }
 
-    method content {
-        ast-coerce self;
-    }
-    multi method COERCE(PDF::COS::Dict $dict) is default { $dict }
-    multi method COERCE(Hash $dict, |c) {
-        my $class := PDF::COS.load-dict: $dict, :base-class(self.WHAT);
-        $class.new: :$dict, |c;
-    }
+    method content { ast-coerce self; }
+    multi method COERCE(::?CLASS $dict) { $dict }
 }

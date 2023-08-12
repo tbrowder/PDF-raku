@@ -1,27 +1,27 @@
 use v6;
 
 our $loader;
-our %required;
+our %loaded;
 
-#| Perl 6 bindings to the Carousel Object System (http://jimpravetz.com/blog/2012/12/in-defense-of-cos/)
+#| Raku bindings to the Carousel Object System (http://jimpravetz.com/blog/2012/12/in-defense-of-cos/)
 role PDF::COS {
+    my subset LatinStr of Str:D is export(:LatinStr) where !.contains(/<-[\x0..\xff \n]>/);
     has $.reader is rw;
     has Int $.obj-num is rw;
-    has UInt $.gen-num is rw;
-
+    has Int $.gen-num is rw;
     method is-indirect is rw returns Bool {
 	Proxy.new(
 	    FETCH => { ? self.obj-num },
 	    STORE => -> \p, Bool \indirect {
 		if indirect {
 		    # Ensure this object is indirect. Serializer will renumber
-		    self.obj-num //= -1;
+		    $!obj-num //= -1;
 		}
 		else {
-		    self.obj-num = Nil;
+		    $!obj-num = Nil;
 		}
 	    },
-	    );
+	);
     }
 
     # high precedence rule to strip enumerations
@@ -35,7 +35,7 @@ role PDF::COS {
             self.new;
         }
         else {
-            warn "failed to coerce {.perl} to {self.WHAT.perl}";
+            warn "failed to coerce {$v.raku} to {self.WHAT.raku}";
             $v;
         }
     }
@@ -70,12 +70,15 @@ role PDF::COS {
 	 $.required('PDF::COS::DateString').COERCE($dt);
     }
 
-    method required(Str \mod-name) {
-	%required{mod-name}:exists
-            ?? %required{mod-name}
-            !! %required{mod-name} = do given ::(mod-name) {
-                $_ ~~ Failure ?? do {.so; (require ::(mod-name))} !! $_;
-            }
+    my $resolve-lock = Lock.new;
+    method required(Str \mod-name) is hidden-from-backtrace {
+        $resolve-lock.protect: {
+            %loaded{mod-name}:exists
+                ?? %loaded{mod-name}
+                !! %loaded{mod-name} = do given ::(mod-name) {
+                    $_ ~~ Failure ?? do {.so; (require ::(mod-name))} !! $_;
+                }
+        }
     }
     method !add-role($obj is rw, Str $role-name, Str $param?) {
 	my $role = $.required($role-name);
@@ -88,15 +91,11 @@ role PDF::COS {
 
     method load-array(List $array) {
         my $base-class = $.required('PDF::COS::Array');
-        $.load-delegate( :$array, :$base-class );
+        $.load-delegate: :$array, :$base-class;
     }
 
     method load-dict(Hash $dict, :$base-class = $.required('PDF::COS::Dict')) {
-	$.load-delegate( :$dict, :$base-class );
-    }
-
-    multi method coerce( List :$array!, |c ) {
-        $.load-array($array).new: :$array, |c;
+	$.load-delegate: :$dict, :$base-class;
     }
 
     my subset IndRef of Pair is export(:IndRef) where {.key eq 'ind-ref'};
@@ -115,15 +114,15 @@ role PDF::COS {
     }
     multi method coerce( Numeric :$real! is copy) { self.coerce: :$real }
 
-    multi method coerce( Str :$hex-string! is rw) {
+    multi method coerce(LatinStr :$hex-string! is rw) {
         self!add-role($hex-string, 'PDF::COS::ByteString', 'hex-string');
     }
-    multi method coerce( Str :$hex-string! is copy) { self.coerce: :$hex-string }
+    multi method coerce( LatinStr :$hex-string! is copy) { self.coerce: :$hex-string }
 
-    multi method coerce( Str :$literal! is rw) {
+    multi method coerce( LatinStr :$literal! is rw) {
         self!add-role($literal, 'PDF::COS::ByteString');
     }
-    multi method coerce( Str :$literal! is copy) { self.coerce: :$literal }
+    multi method coerce( LatinStr :$literal! is copy) { self.coerce: :$literal }
 
     multi method coerce( Str :$name! is rw) {
         self!add-role($name, 'PDF::COS::Name');
@@ -134,6 +133,10 @@ role PDF::COS {
         self!add-role($bool, 'PDF::COS::Bool');
     }
     multi method coerce( Bool :$bool! is copy) { self.coerce: :$bool }
+
+    multi method coerce( List :$array!, |c ) {
+        $.required('PDF::COS::Array').COERCE: $array, |c;
+    }
 
     multi method coerce( Hash :$dict!, |c ) {
         $.required('PDF::COS::Dict').COERCE: $dict, |c;
@@ -147,7 +150,11 @@ role PDF::COS {
         $.required('PDF::COS::Null').COERCE: $null;
     }
 
-    multi method coerce($val) is default { $val }
+    multi method coerce(Bool:D $val is rw) { self!add-role($val, 'PDF::COS::Bool');}
+    multi method coerce(Int:D $val is rw) { self!add-role($val, 'PDF::COS::Int');}
+    multi method coerce(Numeric:D $val is rw) { self!add-role($val, 'PDF::COS::Real');}
+    multi method coerce(Numeric:D $val is copy) { $.coerce($val) }
+    multi method coerce($val) { $val }
 
     method !coercer {
         $.required('PDF::COS::Coercer');

@@ -5,6 +5,7 @@ role PDF::COS::Tie {
     use PDF::COS :IndRef;
     has Attribute $.of-att is rw;      #| default attribute
     has Attribute %.entries;
+    my constant $Lock = Lock.new;
 
     #| generate an indirect reference to ourselves
     method ind-ref returns IndRef {
@@ -28,7 +29,6 @@ role PDF::COS::Tie {
 
     my role COSAttrHOW {
         #| override standard Attribute method for generating accessors
-        method built { False }
 	has COSAttr $.cos is rw handles<tie raku>;
         method tied is rw is DEPRECATED("Please use .cos()") { $.cos }
 
@@ -67,61 +67,74 @@ role PDF::COS::Tie {
 
         method of-att {
             # anonymous attribute for individual items in an array or hash
-            without $!of-att {
-                my $type := $!type.of;
-                $_ = CosOfAttr.new( :name('@!' ~ $.accessor-name), :$type, :package<?> );
-                .cos = $.clone(:!decont, :$type);
+            unless $!of-att.defined {
+                $Lock.protect: {
+                    without $!of-att {
+                        my $type := $!type.of;
+                        $_ = CosOfAttr.new( :name('@!' ~ $.accessor-name), :$type, :package<?> );
+                        .cos = $.clone(:!decont, :$type);
+                    }
+                }
             }
             $!of-att;
         }
 
         multi method tie(IndRef $lval is rw) is rw { $lval } # undereferenced - don't know it's type yet
-	multi method tie($lval is rw, :$check) is rw {
-            if !$lval.defined {
+        multi method tie($lval is rw where !.defined, :$check) is rw {
+            if $check {
+                return $.tie( PDF::COS.coerce($_)) with $.default;
+                die "missing required field: $.accessor-name"
+                    if $.is-required;
+            }
+            $lval;
+        }
+        method !tie-container($lval is raw, :$check) {
+            # of-att typed array declaration, e.g.:
+            #     has PDF::Catalog @.Kids is entry(:indirect);
+            # or, typed hash declarations, e.g.:
+            #     has PDF::ExtGState %.ExtGState is entry;
+            my \reader  = $lval.?reader;
+            my Attribute $att := $lval.of-att;
+            if $att.defined {
+                # already processed elsewhere. check that the type matches
+                die "conflicting types for {$att.name} {$att.type.gist} {$!type.of.gist}"
+                    unless $!type.of ~~ $att.type;
+            }
+            else {
+                $att = self.of-att;
+                my \of-type = $att.type;
+                my \v = $lval.values;
+
                 if $check {
-                    return $.tie( PDF::COS.coerce($_)) with $.default;
-                    die "missing required field: $.accessor-name"
-                        if $.is-required;
+                    with $.length {
+                        die "array not of length: {$_}"
+                            if +v != $_;
+                    }
+                }
+
+                for v {
+                    unless $_ ~~ of-type | IndRef {
+                        ($att.cos.coerce)($_, of-type);
+                        if $check {
+                            die "{.WHAT.^name}.$.accessor-name: {.gist} not of type: {of-type.^name}"
+                            unless $_ ~~ of-type;
+                        }
+                        .reader //= reader if .defined;
+                    }
                 }
             }
-            elsif !($lval ~~ $!type) {
-                my \reader  = $lval.?reader;
+        }
+        multi method tie($lval is rw where !($lval ~~ $!type), :$check) is rw {
+            $Lock.protect: {
 
                 if ($!type ~~ Positional[Mu] && $lval ~~ List)
                 || ($!type ~~ Associative[Mu] && $lval ~~ Hash) {
-                    # of-att typed array declaration, e.g.:
-                    #     has PDF::Catalog @.Kids is entry(:indirect);
-                    # or, typed hash declarations, e.g.:
-                    #     has PDF::ExtGState %.ExtGState is entry;
-                    my Attribute $att := $lval.of-att;
-                    if $att.defined {
-                        # already processed elsewhere. check that the type matches
-                        die "conflicting types for {$att.name} {$att.type.gist} {$!type.of.gist}"
-                            unless $!type.of ~~ $att.type;
-                    }
-                    else {
-                        $att = self.of-att;
-                        my \of-type = $att.type;
-                        my \v = $lval.values;
-
-                        if $check {
-                            with $.length {
-                                die "array not of length: {$_}"
-                                    if +v != $_;
-                            }
-                        }
-
-                        for v {
-                            unless $_ ~~ of-type | IndRef {
-                                ($att.cos.coerce)($_, of-type);
-                                if $check {
-                                    die "{.WHAT.^name}.$.accessor-name: {.gist} not of type: {of-type.^name}"
-                                    unless $_ ~~ of-type;
-                                }
-                                .reader //= reader if .defined;
-                            }
-                        }
-                    }
+                    self!tie-container: $lval, :$check;
+                }
+                elsif $lval.isa(array) && $!type ~~ Positional[Numeric] {
+                    # assume numeric. not so easy to type-check atm
+                    # https://github.com/rakudo/rakudo/issues/4485
+                    # update: fixed as of Rakudo 2021.08
                 }
                 else {
                     my \of-type = $!decont ?? $!type.of !! $!type;
@@ -136,15 +149,17 @@ role PDF::COS::Tie {
                     }
                 }
             }
-            else {
+            $lval;
+        }
+	multi method tie($lval is rw, :$check) is rw {
+            $Lock.protect: {
                 $lval.obj-num //= -1
-                    if $.is-indirect && $lval ~~ PDF::COS;
-            }
+            } if $.is-indirect && $lval ~~ PDF::COS;
 
 	    $lval;
 	}
 
-	multi method tie($lval is copy, :$check) is default is rw {
+	multi method tie($lval is copy, :$check) is rw {
 	    $.tie($lval, :$check);
 	}
 
@@ -182,7 +197,7 @@ role PDF::COS::Tie {
                 }
             }
             else {
-                warn "ignoring entry trait attribute: {arg.perl}"
+                warn "ignoring entry trait attribute: {arg.raku}"
                 unless arg ~~ Bool;
             }
         }
@@ -191,6 +206,8 @@ role PDF::COS::Tie {
             %opts<alias> = %opts<accessor-name>;
             %opts<accessor-name> = $_;
         }
+        warn ':item-or-array should be used with arrays ("@" sigil)'
+            if %opts<decont> && $att.type !~~ Positional[Mu];
         %opts;
     }
 
@@ -214,14 +231,19 @@ role PDF::COS::Tie {
         default        { $_ }
     }
 
-    method mixin($role) {
-        with self {
-            unless .does($role) {
-                .^mixin($role);
-                .tie-init;
-            }
+    method mixin(Any:D: $role is raw) {
+        unless $.does($role) {
+            $.^mixin($role);
+            $.tie-init;
         }
         self;
+    }
+
+    # apply ourselves, if we're a punned role
+    method induce($obj is raw) {
+        $obj.mixin: self.^pun_source
+            if self.^is_pun;
+        $obj;
     }
 
     #| indirect reference
@@ -251,7 +273,7 @@ role PDF::COS::Tie {
     }
 
     #| simple value. no need to coerce
-    multi method deref($value) is default { $value }
+    multi method deref($value) { $value }
 }
 
 =begin pod

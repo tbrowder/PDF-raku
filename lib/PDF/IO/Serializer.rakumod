@@ -4,10 +4,10 @@ class PDF::IO::Serializer {
 
     use PDF::COS;
     use PDF::COS::Stream;
-    use PDF::COS::Util :to-ast;
+    use PDF::COS::Util :&to-ast;
+    use PDF::COS::Type::ObjStm;
 
     has UInt $.size is rw = 1;      #| first free object number
-    has Pair  @!objects;            #| renumbered objects
     has Array %!objects-idx{Any};   #| unique objects index
     has UInt %!ref-count{Any};
     has Bool $.renumber = True;
@@ -15,6 +15,7 @@ class PDF::IO::Serializer {
     has Str $.type = $!reader.?type // 'PDF';
 
     #| Reference count hashes. Could be derivate class of PDF::COS::Dict or PDF::COS::Stream.
+
     multi method ref-count(Hash $dict) {
         unless %!ref-count{$dict}++ { # already encountered
             $.ref-count($dict{$_}) for $dict.keys.sort
@@ -29,7 +30,7 @@ class PDF::IO::Serializer {
     }
 
     #| we don't reference count anything else at the moment.
-    multi method ref-count($) is default { }
+    multi method ref-count($) { }
 
     my subset DictIndObj of Pair where {.key eq 'ind-obj'
                                         && .value[2] ~~ Pair
@@ -64,25 +65,25 @@ class PDF::IO::Serializer {
         temp $trailer.gen-num = 0;
 
         %!ref-count = ();
-        @!objects = ();
         $.ref-count( $trailer );
-        $.freeze( $trailer, :indirect);
-        my %dict = self!get-root(@!objects);
+        my @objects = gather { $.freeze( $trailer, :indirect); }
+        my %dict = self!get-root(@objects);
 
-        %dict<Size> = :int($.size)
+        %dict<Size> = $.size
             unless $.type eq 'FDF';
 
-        [ { :@!objects, :trailer{ :%dict } }, ];
+        [ { :@objects, :trailer{ :%dict } }, ];
     }
 
     #| prepare a set of indirect objects for an incremental update. Only return:
     #| - objects that have been fetched and updated, and
     #| - the trailer dictionary (returned as first object)
-    multi method body( Bool :$updates! where .so,
-                       :$*compress,
-                       :$!size = $!reader.size;
-                       :$prev = $!reader.prev;
-                     ) {
+    multi method body(
+        Bool :$updates! where .so,
+        :$*compress,
+        :$!size = $!reader.size;
+        :$prev = $!reader.prev;
+    ) {
         # disable auto-deref to keep all analysis and freeze stages lazy. if it hasn't been
         # loaded, it hasn't been updated
         temp $!reader.auto-deref = False;
@@ -90,34 +91,34 @@ class PDF::IO::Serializer {
         # using the same object and generation numbers
         temp $!renumber = False;
         %!ref-count = ();
-        @!objects = ();
         my \trailer = $!reader.trailer;
 
         temp trailer.obj-num = 0;
         temp trailer.gen-num = 0;
 
         my @updated-objects = $!reader.get-updates.list;
-
         $.ref-count($_) for @updated-objects;
-        $.freeze($_, :indirect ) for @updated-objects;
+        my @objects = gather {
+            $.freeze($_, :indirect ) for @updated-objects;
+        }
 
-        my %dict = self!get-root(@!objects);
+        my %dict = self!get-root(@objects);
 
-        %dict<Prev> = :int($prev);
-        %dict<Size> = :int($!size);
+        %dict<Prev> = $prev;
+        %dict<Size> = $!size;
 
-        [ { :@!objects, :trailer{ :%dict } }, ]
+        [ { :@objects, :trailer{ :%dict } }, ]
     }
 
     #| return objects without renumbering existing objects. requires a PDF reader
-    multi method body( Bool:_ :$*compress, Bool :$eager = True ) is default {
+    multi method body( Bool:_ :$*compress, Bool :$eager = True ) {
         my @objects = $!reader.get-objects(:$eager);
 
         my %dict = self!get-root(@objects);
         self!discard-linearization(@objects);
 
         %dict<Prev>:delete;
-        %dict<Size> = :int($!reader.size)
+        %dict<Size> = $!reader.size
             unless $.type eq 'FDF';
 
         [ { :@objects, :trailer{ :%dict } }, ]
@@ -125,14 +126,13 @@ class PDF::IO::Serializer {
 
     #| construct a reverse index that maps unique $objects
     #| to an object-number and generation-number.
-    method !index-object( Pair $ind-obj! is rw, :$object!) {
+    method !index-object( Pair $node!, :$object!) {
         my Int $obj-num = $object.obj-num 
-            if $object.can('obj-num')
-            && (! $!reader || $object.reader === $!reader);
-        my UInt $gen-num;
+            if ! $!reader || $object.reader === $!reader;
+        my Int $gen-num;
         constant TrailerObjNum = 0;
 
-        if $obj-num.defined && (($obj-num > 0 && ! $.renumber) || $obj-num == TrailerObjNum) {
+        if $obj-num.defined && (($obj-num > 0 && ! $!renumber) || $obj-num == TrailerObjNum) {
             # keep original object number
             $gen-num = $object.gen-num;
         }
@@ -142,7 +142,7 @@ class PDF::IO::Serializer {
             $gen-num = 0;
         }
 
-        @!objects.push: (:ind-obj[ $obj-num, $gen-num, $ind-obj]);
+        take (:ind-obj[ $obj-num, $gen-num, $node]);
         my $ind-ref = [ $obj-num, $gen-num ];
         %!objects-idx{$object} = $ind-ref;
         :$ind-ref;
@@ -157,12 +157,9 @@ class PDF::IO::Serializer {
     }
 
     #| should this be serialized as an indirect object?
-    method is-indirect($_) {
-        %!ref-count{$_} > 1            #| multiply referenced; needs to be indirect
-            || ? .?obj-num             #| indirect if it has an object number
-            || $_ ~~ PDF::COS::Stream  #| streams need to be indirect
-            || ($_ ~~ Hash && (.<Type>:exists)) # typed hash?
-   }
+    multi method is-indirect(PDF::COS::Stream) { True }
+    multi method is-indirect(Hash $_ where { .<Type>:exists }) { True }
+    multi method is-indirect($_) { %!ref-count{$_} > 1 || ? .obj-num }
 
     #| prepare an object for output.
     #| - if already encountered, return an indirect reference
@@ -187,31 +184,29 @@ class PDF::IO::Serializer {
                 $stream = $object.encoded;
             }
 
-            my $ind-obj;
-            my $slot;
-            my $dict;
-
-            with $stream {
+            my Hash $dict;
+            my $node;
+            my $node-value := do with $stream {
                 my $encoded = .Str;
-                $ind-obj = :stream{
+                $node = :stream{
                     :$dict,
                     :$encoded,
                 };
-                $slot := $ind-obj.value<dict>;
+                $node.value<dict>;
             }
             else {
-                $ind-obj = :$dict;
-                $slot := $ind-obj.value;
+                $node = :$dict;
+                $node.value;
             }
 
             # register prior to traversing the object; in case there are cyclical references
-            my \ret = $indirect || $.is-indirect( $object )
-              ?? self!index-object($ind-obj, :$object )
-              !! $ind-obj;
+            my \rv = $indirect || $.is-indirect( $object )
+              ?? self!index-object($node, :$object )
+              !! $node;
 
-            $slot = self!freeze-dict($object);
+            $node-value = self!freeze-dict($object);
 
-            ret;
+            rv;
         }
     }
 
@@ -223,26 +218,25 @@ class PDF::IO::Serializer {
             :$ind-ref
         }
         else {
-            my $array;
-
-            my $ind-obj = :$array;
-            my $slot := $ind-obj.value;
+            my Array $array;
+            my $node = :$array;
+            my $node-value := $node.value;
 
             # register prior to traversing the object; in case there are cyclical references
-            my \ret = $indirect || $.is-indirect( $object )
-                ?? self!index-object($ind-obj, :$object )
-                !! $ind-obj;
+            my \rv = $indirect || $.is-indirect( $object )
+                ?? self!index-object($node, :$object )
+                !! $node;
 
-            $slot = self!freeze-array($object);
+            $node-value = $object.of ~~ Numeric
+                     ?? $object
+                     !! self!freeze-array($object);
 
-            ret;
+            rv;
         }
     }
 
     #| handles other basic types
-    multi method freeze($other) is default {
-        to-ast $other
-    }
+    multi method freeze($other) { to-ast $other  }
 
     #| build AST, starting at the trailer.
     method ast(

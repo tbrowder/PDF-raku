@@ -41,7 +41,7 @@ role PDF::COS::Tie::Array does PDF::COS::Tie {
 
     method check {
         self.AT-POS($_, :check)
-            for 0 ..^ max(@!index, self);
+            for ^max(@!index, self);
         self
     }
 
@@ -72,12 +72,12 @@ role PDF::COS::Tie::Array does PDF::COS::Tie {
 	self[ +self ] = $val;
     }
 
-    multi method COERCE(PDF::COS::Tie::Array $array) {
-        $array.mixin: self.^roles[0];
+    multi method COERCE(PDF::COS::Tie::Array:D $array) {
+        self.induce: $array;
     }
-    multi method COERCE(List:D $array is raw, :class($) where !.so, |c) {
+    multi method COERCE(List:D $array is raw, |c) {
         my Array:U $class := PDF::COS.load-array($array);
-        $class.COERCE($array, :class, |c).mixin: self.^roles[0];
+        self.induce: $class.new(:$array, |c);
     }
     multi method COERCE(Seq:D $seq is raw, |c) {
         self.COERCE($seq.Array, |c);

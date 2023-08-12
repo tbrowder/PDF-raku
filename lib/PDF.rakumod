@@ -4,9 +4,10 @@ use PDF::COS::Dict;
 
 #| this class represents the top level node in a PDF or FDF document,
 #| the trailer dictionary
-class PDF:ver<0.4.5>
+class PDF:ver<0.5.19>
     is PDF::COS::Dict {
 
+    use PDF::COS;
     use PDF::IO::Serializer;
     use PDF::IO::Reader;
     use PDF::IO::Writer;
@@ -23,32 +24,59 @@ class PDF:ver<0.4.5>
 
     use PDF::COS::Type::Info;
     has PDF::COS::Type::Info $.Info is entry(:indirect);  #| (Optional; must be an indirect reference) The document’s information dictionary
+    has Str $.id;
     has Str @.ID is entry(:len(2));                       #| (Required if an Encrypt entry is present; optional otherwise; PDF 1.1) An array
                                                           #| of two byte-strings constituting a file identifier
 
-    has Hash $.Root is entry( :indirect );                #| generic document root, as defined by subclassee, e.g.  PDF::Class, PDF::FDF
+    has Hash $.Root is entry(:indirect);                  #| generic document root, as defined by subclassee, e.g.  PDF::Class, FDF
     has $.crypt is rw;
     has $!flush = False;
 
     has UInt $.Prev is entry; 
 
-    #| open the input file-name or path
-    method open($spec, Str :$type, |c) {
-        my PDF::IO::Reader $reader .= new;
-        my \doc = self.new: :$reader;
+    submethod TWEAK(:$file, |c) is hidden-from-backtrace {
+        self!open-file($_, |c) with $file;
+    }
 
-        $reader.trailer = doc;
+    method id is rw {
+        $!id //= do {
+            # From [PDF 32000 Section 14.4 File Identifiers:
+            #   "File identifiers shall be defined by the optional ID entry in a PDF file’s trailer dictionary.
+            # The ID entry is optional but should be used. The value of this entry shall be an array of two
+            # byte strings. The first byte string shall be a permanent identifier based on the contents of the
+            # file at the time it was originally created and shall not change when the file is incrementally
+            # updated. The second byte string shall be a changing identifier based on the file’s contents at
+            # the time it was last updated. When a file is first written, both identifiers shall be set to the
+            # same value. If both identifiers match when a file reference is resolved, it is very likely that
+            # the correct and unchanged file has been found. If only the first identifier matches, a different
+            # version of the correct file has been found."
+            #
+            # This section also includes a weird and expensive solution for generating the ID.
+            # Contrary to this, just generate a random identifier.
+
+            my Str $hex-string = Buf.new((^256).pick xx 16).decode("latin-1");
+            PDF::COS.coerce: :$hex-string;
+        }
+    }
+
+    #| open the input file-name or path
+    method open($spec, |c) is hidden-from-backtrace {
+        self.new!open-file: $spec, |c;
+    }
+    method !open-file(::?CLASS:D: $spec, Str :$type, |c) is hidden-from-backtrace {
+        my PDF::IO::Reader $reader .= new: :trailer(self);
+        self.reader = $reader;
         $reader.open($spec, |c);
         with $type {
             die "PDF file has wrong type: " ~ $reader.type
                 unless $reader.type eq $_;
         }
-        doc.crypt = $_
+        self.crypt = $_
             with $reader.crypt;
-        doc;
+        self;
     }
 
-    method encrypt( Str :$owner-pass!, Str :$user-pass = '', :$EncryptMetadata = True, |c ) {
+    method encrypt(PDF:D $doc: Str :$owner-pass!, Str :$user-pass = '', :$EncryptMetadata = True, |c ) {
 
         die '.encrypt(:!EncryptMetadata, ...) is not yet supported'
             unless $EncryptMetadata;
@@ -61,9 +89,9 @@ class PDF:ver<0.4.5>
             }
         }
 
-        self<Encrypt>:delete;
+        $doc<Encrypt>:delete;
         $!flush = True;
-        $!crypt = (require ::('PDF::IO::Crypt::PDF')).new: :doc(self), :$owner-pass, :$user-pass, |c;
+        $!crypt = PDF::COS.required('PDF::IO::Crypt::PDF').new: :$doc, :$owner-pass, :$user-pass, |c;
     }
 
     method !is-indexed {
@@ -93,7 +121,7 @@ class PDF:ver<0.4.5>
         self.cb-finish;
 
 	my $type = $.reader.type;
-	self!generate-id( :$type );
+	self!set-id( :$type );
 
         my PDF::IO::Serializer $serializer .= new( :$.reader, :$type );
         my Array $body = $serializer.body( :updates, |c );
@@ -110,41 +138,50 @@ class PDF:ver<0.4.5>
             # no updates that need saving
         }
         else {
-            self!incremental-save($body[0], :$diffs);
+            my IO::Handle $fh;
+            my Bool $in-place = False;
+
+            do with $diffs {
+                # Seperate saving of updates
+                $fh = $_ unless .path ~~ $.reader.file-name;
+
+            }
+            $fh //= do {
+                $in-place = True;
+                # Append update to the input PDF
+                given $.reader.file-name {
+                    die "Incremental update of JSON files is not supported"
+                        if  m:i/'.json' $/;
+                    .IO.open(:a, :bin);
+                }
+            }
+
+            self!incremental-save($fh, $body[0], :$diffs, :$in-place);
         }
     }
 
-    method !incremental-save(Hash $body, :$diffs) {
-        my Hash $trailer = $body<trailer><dict>;
-	my UInt $prev = $trailer<Prev>.value;
+    method !incremental-save(IO::Handle:D $fh, Hash $body, :$diffs, :$in-place) {
+        my constant Pad = "\n\n".encode('latin-1');
 
-        constant Preamble = "\n\n";
-        my Numeric $offset = $.reader.input.codes + Preamble.codes;
+        my Hash $trailer = $body<trailer><dict>;
+	my UInt $prev = $trailer<Prev>;
         my $size = $.reader.size;
         my $compat = $.reader.compat;
-        my PDF::IO::Writer $writer .= new( :$offset, :$prev, :$size, :$compat  );
-	my IO::Handle $fh;
-        my Str $new-body = Preamble ~ $writer.write-body( $body, my @entries);
+        my PDF::IO::Writer $writer .= new: :$prev, :$size, :$compat;
+        my $offset = $.reader.input.codes + Pad.bytes;
 
-        do with $diffs {
-	    $fh = $_ unless .path eq $.reader.file-name;
-	}
-	$fh //= do {
-	    # in-place update. merge the updated entries in the index
-	    # todo: we should be able to leave the input file open and append to it
+        $fh.write: Pad;
+        $writer.stream-body: $fh, $body, my @entries, :$offset;
+
+        if $in-place {
+	    # Input PDF updated; merge the updated entries in the index
 	    $prev = $writer.prev;
 	    my UInt $size = $writer.size;
-	    $.reader.update( :@entries, :$prev, :$size);
+	    $.reader.update-index( :@entries, :$prev, :$size);
 	    $.Size = $size;
 	    @entries = [];
-            given $.reader.file-name {
-                die "Incremental update of JSON files is not supported"
-                    if  m:i/'.json' $/;
-	        .IO.open(:a, :bin);
-            }
 	}
 
-        $fh.write: $new-body.encode('latin-1');
         $fh.close;
     }
 
@@ -154,20 +191,31 @@ class PDF:ver<0.4.5>
             // self.?type
             // (self<Root><FDF>.defined ?? 'FDF' !! 'PDF');
 
-	self!generate-id( :$type );
+	self!set-id( :$type );
 	my PDF::IO::Serializer $serializer .= new;
-	$serializer.ast( self, :$type, :$!crypt, |c);
+	$serializer.ast: self, :$type, :$!crypt, |c;
+    }
+
+    method !ast-writer(|c) {
+        my $eager := ! $!flush;
+        my $ast = $.ast: :$eager, |c;
+        PDF::IO::Writer.new: :$ast;
+    }
+
+    multi method save-as(IO::Handle $ioh, |c) {
+        self!ast-writer(|c).stream-cos: $ioh;
     }
 
     multi method save-as(IO() $iop,
                      Bool :$preserve = True,
                      Bool :$rebuild = False,
+                     Bool :$stream,
                      |c) {
 	when $iop.extension.lc eq 'json' {
             # save as JSON
-	    $iop.spurt( to-json( $.ast(|c) ));
+	    $iop.spurt: to-json( $.ast(|c) );
 	}
-        when $preserve && !$rebuild && !$!flush && self!is-indexed {
+        when $preserve && !$rebuild && !$!flush && self!is-indexed && $.reader.file-name.defined {
             # copy the input PDF, then incrementally update it. This is faster
             # and plays better with digitally signed documents.
             my $diffs = $iop.open(:a, :bin);
@@ -179,23 +227,21 @@ class PDF:ver<0.4.5>
 	}
 	default {
             # full save
-	    my $ioh = $iop.open(:w, :bin);
-	    $.save-as($ioh, :$rebuild, |c);
+            if $stream {
+                # wont work for in-place update
+	        my $ioh = $iop.open(:w, :bin);
+	        self!ast-writer(|c).stream-cos($ioh);
+                $ioh.close;
+            }
+            else {
+                $iop.spurt: self!ast-writer(|c).Blob;
+            }
 	}
-    }
-
-    multi method save-as(IO::Handle $ioh, |c) is default {
-        my $eager := ! $!flush;
-        my $ast = $.ast(:$eager, |c);
-        my PDF::IO::Writer $writer .= new: :$ast;
-        $ioh.write: $writer.Blob;
-        $ioh.close;
     }
 
     #| stringify to the serialized PDF
     method Str(|c) {
-        my PDF::IO::Writer $writer .= new: |c;
-	$writer.write( $.ast )
+	self!ast-writer(|c).write;
     }
 
     # permissions check, e.g: $doc.permitted( PermissionsFlag::Modify )
@@ -216,32 +262,15 @@ class PDF:ver<0.4.5>
 	self.Str(|c).encode: "latin-1";
     }
 
-    #| Generate a new document ID.
-    method !generate-id(Str :$type = 'PDF') {
-
-	# From [PDF 32000 Section 14.4 File Identifiers:
-	#   "File identifiers shall be defined by the optional ID entry in a PDF file’s trailer dictionary.
-	# The ID entry is optional but should be used. The value of this entry shall be an array of two
-	# byte strings. The first byte string shall be a permanent identifier based on the contents of the
-	# file at the time it was originally created and shall not change when the file is incrementally
-	# updated. The second byte string shall be a changing identifier based on the file’s contents at
-	# the time it was last updated. When a file is first written, both identifiers shall be set to the
-	# same value. If both identifiers match when a file reference is resolved, it is very likely that
-	# the correct and unchanged file has been found. If only the first identifier matches, a different
-	# version of the correct file has been found.
-	#
-	# This section also includes a weird and expensive solution for generating the ID.
-	# Contrary to this, just generate a random identifier.
-
-	my $obj = $type eq 'FDF' ?? self<Root><FDF> !! self;
-	my Str $hex-string = Buf.new((^256).pick xx 16).decode("latin-1");
-	my \new-id = PDF::COS.coerce: :$hex-string;
-
+    #| Initialize or update the document id
+    method !set-id(Str :$type = 'PDF') {
+        my $obj = $type eq 'FDF' ?? self<Root><FDF> !! self;
 	with $obj<ID> {
-	    .[1] = new-id; # Update modification ID
+	    .[1] = $.id; # Update modification ID
 	}
 	else {
-	    $_ = [ new-id, new-id ]; # Initialize creation and modification IDs
+	    $_ = [ $.id xx 2 ]; # Initialize creation and modification IDs
 	}
+        $!id = Nil;
     }
 }

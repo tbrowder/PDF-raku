@@ -2,6 +2,7 @@ use v6;
 
 class PDF::IO::Filter::Flate {
 
+    use PDF::COS;
     use PDF::IO::Filter::Predictors;
     use Compress::Zlib;
     use PDF::IO::Blob;
@@ -10,13 +11,13 @@ class PDF::IO::Filter::Flate {
     # Maintainer's Note: Flate is described in the PDF 32000 spec in section 7.4.4.
     # See also http://www.libpng.org/pub/png/book/chapter09.html - PNG predictors
     sub predictor-class {
-        state $predictor-class = PDF::IO::Util::have-pdf-native()
-            ?? (require ::('PDF::Native::Filter::Predictors'))
-            !! PDF::IO::Filter::Predictors;
-        $predictor-class
+        # load a faster alternative, if available
+        state $ = INIT given try {require ::('PDF::Native::Filter::Predictors')} {
+            $_ === Nil ?? PDF::IO::Filter::Predictors !! $_;
+        }
     }
 
-    multi method encode(Blob $_, :$Predictor, |c --> PDF::IO::Blob) is default {
+    multi method encode(Blob $_, :$Predictor, |c --> PDF::IO::Blob) {
         PDF::IO::Blob.new: compress($Predictor ?? predictor-class.encode( $_, :$Predictor, |c ) !! $_);
     }
     multi method encode(Str $_, |c) {

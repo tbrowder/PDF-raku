@@ -66,7 +66,7 @@ class PDF::COS::Type::ObjStm
         my UInt \n = $.N;
 
         my Str \object-index-str = bytes.substr(0, first);
-        my PDF::Grammar::PDF::Actions $actions .= new;
+        my PDF::Grammar::PDF::Actions $actions .= new: :lite;
         PDF::Grammar::PDF.parse(object-index-str, :rule<object-stream-index>, :$actions)
             or die X::PDF::ObjStm::Decode.new( :$.obj-num, :$.gen-num, :details("Unable to parse object stream index: {object-index-str}"));
 
@@ -74,7 +74,7 @@ class PDF::COS::Type::ObjStm
         die X::PDF::ObjStm::Decode.new( :$.obj-num, :$.gen-num, :details("Expected /N = {n} index entries, got {+object-index}"))
             unless +object-index >= n;
 
-        [ (0 ..^ n).map: -> \i {
+        [ (^n).map: -> \i {
             my UInt \obj-num = object-index[i][0];
             my UInt \begin = first + object-index[i][1];
             my UInt \end = ((i+2) <= +object-index)
